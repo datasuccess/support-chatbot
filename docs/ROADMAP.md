@@ -19,6 +19,10 @@ unchanged entries. Full version history.
 Hybrid vector + keyword search, RRF fusion, `bge-reranker-v2-m3` cross-encoder.
 Eval harness comparing four pipeline configurations, with a CI-usable exit code.
 
+Measured: hit@3 **100%**, off-topic rejection **4/4**, retrieval **1.4s**. The
+harness caught a double-sigmoid bug that had silently disabled the escalation gate
+entirely — see ADR-009 and `EVALUATION.md`.
+
 ## ✅ Phase 3 — Answer service
 Query rewriting for multi-turn, confidence gate, grounded generation streamed over
 SSE, source citations, automatic escalation below threshold, full retrieval and
@@ -48,6 +52,14 @@ Seven views: volume, deflection, satisfaction, entry usage, content gaps, cost,
 KB health. Exposed through manager-only endpoints.
 
 **Gap:** no dashboard UI.
+
+---
+
+## ✅ Testing
+`scripts/smoke_test.py` — 37 end-to-end checks: streaming chat, multi-turn,
+out-of-scope escalation, ratings, CSAT, RBAC boundaries, full KB lifecycle,
+four-eyes enforcement, review queue, promote-to-KB, analytics, audit chain
+verification, widget assets. **37 passed, 0 failed.**
 
 ---
 

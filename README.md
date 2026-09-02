@@ -110,6 +110,16 @@ Reports hit@1/3/5 and MRR for the full pipeline against keyword-only, vector-onl
 and un-reranked baselines, so the added complexity has to justify itself. Exits
 non-zero below the hit@3 threshold, which makes it usable as a CI gate.
 
+Current measured results — **hit@3 100%, off-topic rejection 4/4, retrieval 1.4s,
+~$0.0007 per answer**, and 37/37 end-to-end tests passing. Read
+[`docs/EVALUATION.md`](docs/EVALUATION.md) for the caveats: the synthetic dataset
+is too easy to discriminate between pipelines, and these numbers will move once
+real content lands.
+
+```bash
+python -u scripts/smoke_test.py   # 37 end-to-end checks against a running API
+```
+
 ## Documentation
 
 | Document | Contents |
@@ -120,6 +130,7 @@ non-zero below the hit@3 threshold, which makes it usable as a CI gate.
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Threat model, RBAC, PII handling, known gaps |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Operational procedures, go-live checklist |
 | [`docs/API.md`](docs/API.md) | Endpoint reference |
+| [`docs/EVALUATION.md`](docs/EVALUATION.md) | Measured results, latency, cost, and what they do not prove |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phase status: what is built, what is not |
 
 ## Repository layout

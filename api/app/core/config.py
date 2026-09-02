@@ -25,9 +25,17 @@ class Settings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
 
     # --- retrieval tuning ---
-    retrieval_candidates: int = 20   # pulled from hybrid search, fed to the reranker
+    # Reranking is ~95% of retrieval latency (~57ms per candidate on CPU), and
+    # 10 candidates measured identically to 20 on the golden set. Raise it if
+    # recall suffers on real content; the cost is linear.
+    retrieval_candidates: int = 10   # pulled from hybrid search, fed to the reranker
     retrieval_top_k: int = 3         # survive reranking, passed to the LLM
-    confidence_threshold: float = 0.45  # below this -> escalate rather than guess
+
+    # Calibrated against the golden set: in-scope scores have a median of 0.97
+    # and a 10th percentile of 0.32, while off-topic questions peak at 0.0033.
+    # 0.10 clears the off-topic ceiling by 30x while still escalating genuinely
+    # weak matches. Re-tune on real content — see docs/RUNBOOK.md.
+    confidence_threshold: float = 0.10
 
     # --- app ---
     app_env: str = "local"

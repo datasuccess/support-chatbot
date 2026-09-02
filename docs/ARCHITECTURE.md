@@ -86,18 +86,22 @@ query and document into vectors independently and never actually compares them �
 it compares two lossy summaries. A cross-encoder attends across both. The gap
 widens on lower-resource languages, which is exactly the Azerbaijani case.
 
-Cost: ~200-400ms on CPU for 20 candidates. At this traffic level, free.
+Measured cost: ~57ms per candidate on CPU, so 637ms for the default 10 candidates
+— about 95% of total retrieval latency. See `EVALUATION.md` for the full breakdown
+and ADR-010 for why the pool is 10 rather than 20.
 
 ### 5. Confidence gate
 
-The reranker's top logit is squashed through a sigmoid into 0..1 and compared
-against `CONFIDENCE_THRESHOLD` (default 0.45). Below it, the bot does not call the
+The reranker's top score — already 0..1, since `CrossEncoder` applies its own
+sigmoid — is compared against `CONFIDENCE_THRESHOLD` (default 0.10, calibrated from
+the measured distribution; see ADR-009). Below it, the bot does not call the
 LLM at all — it returns a fixed message offering a human, and opens an escalation
 so the support team sees the gap even if the user gives up and leaves.
 
 Tuning this is a policy decision, not a technical one. Higher means fewer wrong
-answers and more escalations; lower means the reverse. Set it from the eval
-harness's out-of-scope rejection rate, then revisit with real traffic.
+answers and more escalations; lower means the reverse. Measured separation on the
+golden set is wide — in-scope median 0.968 against an off-topic ceiling of 0.0033 —
+which is what makes the gate reliable. Re-calibrate on real content.
 
 ### 6. Grounded generation
 

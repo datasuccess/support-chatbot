@@ -120,14 +120,18 @@ def _fuse(vector_rows: list[dict], keyword_rows: list[dict]) -> dict[int, Candid
 
 
 def _confidence(top_score: float) -> float:
-    """Map the reranker's raw logit onto 0..1 via a logistic curve.
+    """Confidence for the gate, on a 0..1 scale.
 
-    bge-reranker-v2-m3 emits unbounded logits; roughly, >0 means relevant. The
-    sigmoid gives a stable, tunable number to compare against a threshold.
+    sentence-transformers' CrossEncoder already applies a sigmoid for single-label
+    rerankers (`activation_fn=Sigmoid()`), so bge-reranker-v2-m3 scores arrive
+    bounded in 0..1 and are used directly.
+
+    Applying a second sigmoid here — as an earlier version did — compressed the
+    whole range into [0.5, 0.73] and made any threshold below 0.5 unreachable,
+    so nothing was ever rejected. The scale is heavily skewed toward zero, hence
+    the low default threshold; see docs/RUNBOOK.md on tuning it.
     """
-    import math
-
-    return 1.0 / (1.0 + math.exp(-top_score))
+    return top_score
 
 
 async def search(

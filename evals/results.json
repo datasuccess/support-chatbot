@@ -1,0 +1,214 @@
+{
+  "pipelines": [
+    {
+      "pipeline": "keyword only",
+      "cases": 24,
+      "hit@1": 79.2,
+      "hit@3": 87.5,
+      "hit@5": 87.5,
+      "mrr": 0.826,
+      "misses": 3
+    },
+    {
+      "pipeline": "vector only",
+      "cases": 24,
+      "hit@1": 100.0,
+      "hit@3": 100.0,
+      "hit@5": 100.0,
+      "mrr": 1.0,
+      "misses": 0
+    },
+    {
+      "pipeline": "hybrid RRF (no rerank)",
+      "cases": 24,
+      "hit@1": 91.7,
+      "hit@3": 100.0,
+      "hit@5": 100.0,
+      "mrr": 0.951,
+      "misses": 0
+    },
+    {
+      "pipeline": "hybrid + reranker",
+      "cases": 24,
+      "hit@1": 91.7,
+      "hit@3": 100.0,
+      "hit@5": 100.0,
+      "mrr": 0.958,
+      "misses": 0
+    }
+  ],
+  "out_of_scope": {
+    "cases": 4,
+    "correctly_rejected": 4,
+    "rate": 100.0,
+    "detail": [
+      {
+        "question": "Bakıda hava necədir?",
+        "confidence": 0.0,
+        "rejected": true
+      },
+      {
+        "question": "Mənə plov resepti de",
+        "confidence": 0.0,
+        "rejected": true
+      },
+      {
+        "question": "Dollar məzənnəsi nə qədərdir?",
+        "confidence": 0.0,
+        "rejected": true
+      },
+      {
+        "question": "2+2 neçə edir?",
+        "confidence": 0.003,
+        "rejected": true
+      }
+    ]
+  },
+  "avg_latency_ms": 1383,
+  "details": [
+    {
+      "question": "yeni şirkət kimi necə qeydiyyatdan keçim?",
+      "rank": 1,
+      "confidence": 0.852,
+      "top": "Şirkətimi necə qeydiyyatdan keçirə bilərəm? Təşkilat qeydiyyatı üçün nə lazımdır?"
+    },
+    {
+      "question": "VÖEN-i sistem qəbul etmir",
+      "rank": 1,
+      "confidence": 0.977,
+      "top": "Qeydiyyatdan keçəndə VÖEN yoxlaması uğursuz oldu, nə etməliyəm?"
+    },
+    {
+      "question": "profil məlumatlarımı dəyişmək istəyirəm",
+      "rank": 1,
+      "confidence": 0.987,
+      "top": "İstifadəçi profilimi necə yeniləyə bilərəm?"
+    },
+    {
+      "question": "şifrəmi unutmuşam nə edim",
+      "rank": 1,
+      "confidence": 0.988,
+      "top": "İmzalama zamanı şifrəni unutmuşam, nə etməliyəm?"
+    },
+    {
+      "question": "asan imza ilə girə bilmirəm",
+      "rank": 1,
+      "confidence": 0.994,
+      "top": "ASAN İmza ilə giriş zamanı problem yaranır, nə etməliyəm?"
+    },
+    {
+      "question": "hesabım bağlanıb, açmaq üçün nə etməliyəm",
+      "rank": 1,
+      "confidence": 0.809,
+      "top": "Hesabım bloklanıb, nə etməliyəm?"
+    },
+    {
+      "question": "hansı tenderlər var, necə tapım",
+      "rank": 1,
+      "confidence": 0.977,
+      "top": "Tender axtarışı necə aparılır?"
+    },
+    {
+      "question": "yeni elanlardan xəbərdar olmaq istəyirəm",
+      "rank": 1,
+      "confidence": 0.991,
+      "top": "Yeni tender elanlarından xəbərdar olmaq üçün ən yaxşı üsul nədir?"
+    },
+    {
+      "question": "qiymət cədvəlini necə dolduraram",
+      "rank": 1,
+      "confidence": 0.995,
+      "top": "Qiymət cədvəlini necə əlavə edim?"
+    },
+    {
+      "question": "təklifimi hazırlayıram amma saxlaya bilmirəm",
+      "rank": 1,
+      "confidence": 0.319,
+      "top": "Təklif yaradılarkən səhv etmişəm, necə düzəldim?"
+    },
+    {
+      "question": "təklifi göndərdikdən sonra dəyişə bilərəmmi",
+      "rank": 1,
+      "confidence": 0.999,
+      "top": "Təklifimi göndərdikdən sonra dəyişiklik edə bilərəmmi?"
+    },
+    {
+      "question": "son tarix keçib, hələ də göndərə bilərəm?",
+      "rank": 1,
+      "confidence": 0.968,
+      "top": "Son tarixdən əvvəl təklifi geri çağırıb yenidən göndərə bilərəmmi?"
+    },
+    {
+      "question": "faylı yükləyə bilmirəm çox böyükdür deyir",
+      "rank": 1,
+      "confidence": 0.785,
+      "top": "Fayl yükləyəndə xəta verir, nə etməliyəm?"
+    },
+    {
+      "question": "hansı formatda sənəd qəbul olunur",
+      "rank": 1,
+      "confidence": 0.966,
+      "top": "Hansı formatda sənəd yükləyə bilərəm?"
+    },
+    {
+      "question": "sənədi elektron imzalamaq lazımdır?",
+      "rank": 1,
+      "confidence": 0.996,
+      "top": "Sənədi imzalamadan göndərə bilərəmmi?"
+    },
+    {
+      "question": "tenderi udmuşuq, indi nə olacaq",
+      "rank": 2,
+      "confidence": 0.363,
+      "top": "Təklifin müddəti bitdikdə nə baş verir?"
+    },
+    {
+      "question": "müqaviləyə əlavə etmək olar?",
+      "rank": 1,
+      "confidence": 0.998,
+      "top": "Müqaviləyə əlavələr necə edilir?"
+    },
+    {
+      "question": "pul nə vaxt köçürüləcək",
+      "rank": 2,
+      "confidence": 0.005,
+      "top": "Təminat məbləği nə vaxt qaytarılır?"
+    },
+    {
+      "question": "hesab-fakturanı haradan götürüm",
+      "rank": 1,
+      "confidence": 0.685,
+      "top": "Hesab-fakturanı necə təqdim edim?"
+    },
+    {
+      "question": "təminat məbləği nə qədərdir",
+      "rank": 1,
+      "confidence": 0.594,
+      "top": "Təminat məbləğini azaltmaq olarmı?"
+    },
+    {
+      "question": "nəticədən narazıyam şikayət etmək istəyirəm",
+      "rank": 1,
+      "confidence": 0.644,
+      "top": "Apellyasiya şikayətdən nə ilə fərqlənir?"
+    },
+    {
+      "question": "şikayətə neçə gün baxılır",
+      "rank": 1,
+      "confidence": 0.993,
+      "top": "Şikayətimə baxılma müddəti nə qədərdir?"
+    },
+    {
+      "question": "sayt açılmır xəta verir",
+      "rank": 1,
+      "confidence": 0.272,
+      "top": "Sistemə daxil ola bilmirəm, səhifə açılmır, nə edə bilərəm?"
+    },
+    {
+      "question": "hansı brauzerdən istifadə etməliyəm",
+      "rank": 1,
+      "confidence": 0.455,
+      "top": "ASAN İmza üçün hansı brauzerlər dəstəklənir?"
+    }
+  ]
+}

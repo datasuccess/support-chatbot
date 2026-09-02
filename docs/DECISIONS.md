@@ -184,3 +184,49 @@ double-checks it.
 **Control.** `SELECT count(*) FROM kb_entries WHERE source='synthetic'` must return
 0 before go-live. Documented in the README, `docs/RUNBOOK.md`, and the generator's
 own docstring.
+
+---
+
+## ADR-009 — Confidence threshold calibrated from measurement, not intuition
+
+**Status:** accepted · 2026-09-02
+
+**Context.** `CONFIDENCE_THRESHOLD` shipped at 0.45, chosen as a plausible-looking
+midpoint. The first evaluation run rejected **0 of 4** off-topic questions.
+
+**Root cause.** `sentence-transformers`' `CrossEncoder` already applies a sigmoid
+for single-label rerankers (`activation_fn=Sigmoid()`). `_confidence()` applied a
+second one, compressing every score into `sigmoid(0)=0.500`..`sigmoid(1)=0.731`.
+No threshold below 0.5 could ever fire.
+
+**Decision.** Use the reranker score directly, and set the threshold to **0.10**
+from the measured distribution: in-scope median 0.968 and 10th percentile 0.319,
+against an off-topic ceiling of 0.0033 — roughly 30x clearance.
+
+**What this says about the process.** Retrieval metrics did not catch it, and could
+not have: ranking is invariant under any monotonic transform, so hit@k was
+unaffected. Only the out-of-scope test exposed it. A suite that measured retrieval
+alone would have shipped a bot that answered every question about the weather.
+
+**Follow-up.** Re-calibrate against real content before go-live. The runbook has
+the queries.
+
+---
+
+## ADR-010 — Ten rerank candidates, not twenty
+
+**Status:** accepted · 2026-09-02
+
+**Context.** Reranking is ~95% of retrieval latency at roughly 57ms per candidate
+on CPU, scaling linearly: 20 candidates cost 1144ms, 10 cost 637ms, 5 cost 310ms.
+
+**Decision.** Default to 10.
+
+**Reasoning.** Retrieval quality measured identically at 5, 10 and 20 on the golden
+set. Ten keeps a reasonable pool for the reranker while halving the latency, and
+lands perceived time-to-first-token near 2 seconds.
+
+**Caveat.** This was measured on synthetic content where the correct entry is
+almost always already ranked first by vector search. Real content is likely to need
+a wider pool. `RETRIEVAL_CANDIDATES` is configurable; re-measure at Phase 8 rather
+than assuming this default still holds.
