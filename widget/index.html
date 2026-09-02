@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="az">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dəstək köməkçisi</title>
+<style>
+  /* Design notes:
+     - Colours meet WCAG 2.1 AA contrast against their backgrounds.
+     - Focus rings are never removed; keyboard users must be able to see where
+       they are. Government services are typically held to AA by law.        */
+  :root {
+    --bg: #ffffff;
+    --panel: #f6f8fa;
+    --ink: #1a1d21;
+    --ink-soft: #5b6470;
+    --brand: #1c5d99;
+    --brand-ink: #ffffff;
+    --border: #dfe3e8;
+    --ok: #1a7f52;
+    --warn: #9a5b00;
+    --radius: 12px;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: var(--font); background: var(--bg); color: var(--ink);
+    display: flex; flex-direction: column; font-size: 15px; line-height: 1.55;
+  }
+  header {
+    background: var(--brand); color: var(--brand-ink);
+    padding: 14px 16px; display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+  }
+  header .title { font-weight: 600; font-size: 15px; }
+  header .sub { font-size: 12px; opacity: .85; }
+  #log {
+    flex: 1; overflow-y: auto; padding: 16px; display: flex;
+    flex-direction: column; gap: 14px;
+  }
+  .msg { max-width: 88%; }
+  .msg.user { align-self: flex-end; }
+  .msg.bot  { align-self: flex-start; }
+  .bubble {
+    padding: 10px 13px; border-radius: var(--radius); white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .user .bubble { background: var(--brand); color: var(--brand-ink); border-bottom-right-radius: 4px; }
+  .bot .bubble  { background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .bot .bubble ol { margin: 8px 0 0; padding-inline-start: 22px; }
+  .bot .bubble li { margin-bottom: 4px; }
+  .bot .bubble strong { font-weight: 650; }
+  .sources {
+    margin-top: 8px; font-size: 12px; color: var(--ink-soft);
+    border-top: 1px dashed var(--border); padding-top: 6px;
+  }
+  .actions { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+  button {
+    font-family: var(--font); font-size: 13px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--bg); color: var(--ink-soft);
+    border-radius: 8px; padding: 5px 9px;
+  }
+  button:hover { background: var(--panel); color: var(--ink); }
+  button:focus-visible { outline: 3px solid #7aa7d1; outline-offset: 2px; }
+  button[aria-pressed="true"] { background: #e6f2ea; border-color: var(--ok); color: var(--ok); }
+  .escalate { margin-inline-start: auto; color: var(--brand); border-color: #b9d0e5; }
+  .typing { display: inline-flex; gap: 4px; padding: 4px 2px; }
+  .typing span {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--ink-soft);
+    animation: blink 1.2s infinite ease-in-out;
+  }
+  .typing span:nth-child(2) { animation-delay: .2s; }
+  .typing span:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .25 } 40% { opacity: 1 } }
+  @media (prefers-reduced-motion: reduce) { .typing span { animation: none; opacity: .6 } }
+  footer { border-top: 1px solid var(--border); padding: 10px; flex-shrink: 0; background: var(--bg); }
+  .composer { display: flex; gap: 8px; align-items: flex-end; }
+  textarea {
+    flex: 1; resize: none; font-family: var(--font); font-size: 15px;
+    border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px;
+    max-height: 120px; min-height: 40px; color: var(--ink);
+  }
+  textarea:focus-visible { outline: 3px solid #7aa7d1; outline-offset: 1px; border-color: var(--brand); }
+  .send {
+    background: var(--brand); color: var(--brand-ink); border-color: var(--brand);
+    padding: 9px 15px; font-weight: 600; border-radius: 10px;
+  }
+  .send:hover:not(:disabled) { background: #17507f; color: #fff; }
+  .send:disabled { opacity: .5; cursor: not-allowed; }
+  .disclaimer { font-size: 11px; color: var(--ink-soft); margin-top: 7px; text-align: center; }
+  .csat { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+  .csat .stars { display: flex; gap: 4px; margin-top: 8px; }
+  .csat button { font-size: 20px; padding: 2px 6px; line-height: 1; }
+  .visually-hidden {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<header>
+  <span aria-hidden="true" style="font-size:20px">🏛️</span>
+  <div>
+    <div class="title">Dəstək köməkçisi</div>
+    <div class="sub">Dövlət Satınalmaları Portalı</div>
+  </div>
+</header>
+
+<!-- aria-live announces streamed answers to screen-reader users. "polite" so it
+     waits for a pause rather than interrupting. -->
+<main id="log" role="log" aria-live="polite" aria-label="Söhbət tarixçəsi"></main>
+
+<footer>
+  <form class="composer" id="form">
+    <label for="input" class="visually-hidden">Sualınızı yazın</label>
+    <textarea id="input" rows="1" placeholder="Sualınızı yazın…" autocomplete="off"></textarea>
+    <button type="submit" class="send" id="send">Göndər</button>
+  </form>
+  <div class="disclaimer">Cavablar bilik bazasına əsaslanır. Dəqiq məlumat üçün dəstəyə müraciət edin.</div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  const API = new URLSearchParams(location.search).get("api") || "";
+  const TENANT = new URLSearchParams(location.search).get("tenant") || "mof-contracts";
+
+  // One session per browser tab-group; conversation history is keyed on this.
+  const sessionId = (function () {
+    let s = null;
+    try { s = sessionStorage.getItem("sc_session"); } catch (e) { /* private mode */ }
+    if (!s) {
+      s = "s_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      try { sessionStorage.setItem("sc_session", s); } catch (e) { /* ignore */ }
+    }
+    return s;
+  })();
+
+  const log = document.getElementById("log");
+  const form = document.getElementById("form");
+  const input = document.getElementById("input");
+  const sendBtn = document.getElementById("send");
+  let busy = false;
+  let answered = 0;
+
+  /* Escape first, then apply a deliberately tiny markdown subset. The model's
+     output is untrusted text; building HTML from it without escaping would be a
+     straightforward XSS hole. */
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => (
+      { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+    ));
+  }
+
+  function renderMarkdown(text) {
+    let html = escapeHtml(text);
+    html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    const lines = html.split("\n");
+    let out = "", inList = false;
+    for (const line of lines) {
+      const m = line.match(/^\s*(\d+)[.)]\s+(.*)$/);
+      if (m) {
+        if (!inList) { out += "<ol>"; inList = true; }
+        out += "<li>" + m[2] + "</li>";
+      } else {
+        if (inList) { out += "</ol>"; inList = false; }
+        out += line + "\n";
+      }
+    }
+    if (inList) out += "</ol>";
+    return out.trim();
+  }
+
+  function scrollDown() { log.scrollTop = log.scrollHeight; }
+
+  function addUser(text) {
+    const el = document.createElement("div");
+    el.className = "msg user";
+    el.innerHTML = '<div class="bubble"></div>';
+    el.querySelector(".bubble").textContent = text;
+    log.appendChild(el);
+    scrollDown();
+  }
+
+  function addBot() {
+    const el = document.createElement("div");
+    el.className = "msg bot";
+    el.innerHTML =
+      '<div class="bubble"><span class="typing" aria-label="Cavab yazılır">' +
+      "<span></span><span></span><span></span></span></div>";
+    log.appendChild(el);
+    scrollDown();
+    return el;
+  }
+
+  async function post(path, body) {
+    const r = await fetch(API + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }
+
+  function addFooter(el, meta) {
+    const bubble = el.querySelector(".bubble");
+
+    if (meta.sources && meta.sources.length) {
+      const src = document.createElement("div");
+      src.className = "sources";
+      src.textContent = "📎 Mənbə: " + meta.sources.map(s => s.citation || s.title).join(" · ");
+      bubble.appendChild(src);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+
+    if (meta.message_id) {
+      [["👍", 1, "Faydalı oldu"], ["👎", -1, "Faydalı olmadı"]].forEach(([icon, value, label]) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = icon;
+        b.setAttribute("aria-label", label);
+        b.setAttribute("aria-pressed", "false");
+        b.onclick = async () => {
+          actions.querySelectorAll("[aria-pressed]").forEach(x => x.setAttribute("aria-pressed", "false"));
+          b.setAttribute("aria-pressed", "true");
+          try { await post("/api/chat/rate", { message_id: meta.message_id, value: value }); }
+          catch (e) { /* a failed rating must not break the conversation */ }
+        };
+        actions.appendChild(b);
+      });
+    }
+
+    const esc = document.createElement("button");
+    esc.type = "button";
+    esc.className = "escalate";
+    esc.textContent = "💬 Dəstəyə yaz";
+    esc.onclick = async () => {
+      esc.disabled = true;
+      try {
+        await post("/api/chat/escalate", { session_id: sessionId, message_id: meta.message_id || null });
+        esc.textContent = "✅ Dəstəyə göndərildi";
+      } catch (e) { esc.textContent = "⚠️ Alınmadı"; esc.disabled = false; }
+    };
+    actions.appendChild(esc);
+    bubble.appendChild(actions);
+
+    // Ask for a rating once, after the conversation has actually gone somewhere.
+    if (++answered === 3) setTimeout(showCsat, 900);
+  }
+
+  function showCsat() {
+    if (document.querySelector(".csat")) return;
+    const el = document.createElement("div");
+    el.className = "msg bot";
+    el.innerHTML =
+      '<div class="csat"><div>⭐ Bu söhbət nə dərəcədə faydalı oldu?</div>' +
+      '<div class="stars" role="group" aria-label="Qiymətləndirmə, 1-dən 5-ə"></div></div>';
+    const stars = el.querySelector(".stars");
+    for (let i = 1; i <= 5; i++) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = "☆";
+      b.setAttribute("aria-label", i + " ulduz");
+      b.onclick = async () => {
+        Array.from(stars.children).forEach((c, idx) => { c.textContent = idx < i ? "★" : "☆"; });
+        try { await post("/api/chat/csat", { session_id: sessionId, score: i }); } catch (e) {}
+        el.querySelector(".csat").insertAdjacentHTML("beforeend",
+          '<div style="margin-top:8px;font-size:13px">Təşəkkür edirik! 🙏</div>');
+      };
+      stars.appendChild(b);
+    }
+    log.appendChild(el);
+    scrollDown();
+  }
+
+  /* Server-Sent Events over fetch rather than EventSource: EventSource cannot
+     issue a POST, and the question has to go in a request body. */
+  async function ask(text) {
+    const el = addBot();
+    const bubble = el.querySelector(".bubble");
+    let acc = "";
+    let meta = {};
+    let started = false;
+
+    try {
+      const resp = await fetch(API + "/api/chat/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId, message: text, tenant: TENANT })
+      });
+      if (!resp.ok || !resp.body) throw new Error("HTTP " + resp.status);
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE frames are separated by a blank line.
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() || "";
+
+        for (const frame of frames) {
+          let event = "message";
+          const dataLines = [];
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("event: ")) event = line.slice(7).trim();
+            else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+          }
+          const data = dataLines.join("\n");
+
+          if (event === "token") {
+            if (!started) { bubble.innerHTML = ""; started = true; }
+            acc += data;
+            bubble.innerHTML = renderMarkdown(acc);
+            scrollDown();
+          } else if (event === "done") {
+            try { meta = JSON.parse(data); } catch (e) { meta = {}; }
+          }
+        }
+      }
+    } catch (err) {
+      bubble.innerHTML = renderMarkdown(
+        "⚠️ Bağlantı xətası baş verdi. Zəhmət olmasa bir azdan yenidən cəhd edin."
+      );
+    }
+
+    if (!started && !acc) bubble.innerHTML = renderMarkdown("⚠️ Cavab alınmadı.");
+    addFooter(el, meta);
+    scrollDown();
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text || busy) return;
+    busy = true;
+    sendBtn.disabled = true;
+    input.value = "";
+    input.style.height = "auto";
+    addUser(text);
+    await ask(text);
+    busy = false;
+    sendBtn.disabled = false;
+    input.focus();
+  });
+
+  // Enter sends, Shift+Enter makes a new line.
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+  });
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 120) + "px";
+  });
+
+  // Opening greeting.
+  const hello = addBot();
+  hello.querySelector(".bubble").innerHTML = renderMarkdown(
+    "👋 Salam! Mən Dövlət Satınalmaları Portalının dəstək köməkçisiyəm.\n\n" +
+    "Qeydiyyat, tenderlər, təkliflər, sənədlər və ödənişlərlə bağlı suallarınızı verə bilərsiniz."
+  );
+  input.focus();
+})();
+</script>
+</body>
+</html>
