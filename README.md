@@ -86,6 +86,7 @@ Then open:
 
 | URL | What |
 |---|---|
+| http://localhost:8000/console | **Staff console** — queue, KB, approvals, analytics |
 | http://localhost:8000/demo | Host page with the widget embedded |
 | http://localhost:8000/widget | The chat UI on its own |
 | http://localhost:8000/docs | OpenAPI reference |
@@ -111,13 +112,14 @@ and un-reranked baselines, so the added complexity has to justify itself. Exits
 non-zero below the hit@3 threshold, which makes it usable as a CI gate.
 
 Current measured results — **hit@3 100%, off-topic rejection 4/4, retrieval 1.4s,
-~$0.0007 per answer**, and 37/37 end-to-end tests passing. Read
+~$0.0007 per answer**, with **59/59 end-to-end** and **25/25 security** checks passing. Read
 [`docs/EVALUATION.md`](docs/EVALUATION.md) for the caveats: the synthetic dataset
 is too easy to discriminate between pipelines, and these numbers will move once
 real content lands.
 
 ```bash
-python -u scripts/smoke_test.py   # 37 end-to-end checks against a running API
+python -u scripts/smoke_test.py     # 59 end-to-end checks
+python -u scripts/security_test.py  # 25 attacks, each passing only when blocked
 ```
 
 ## Documentation
@@ -128,6 +130,7 @@ python -u scripts/smoke_test.py   # 37 end-to-end checks against a running API
 | [`docs/SCHEMA.md`](docs/SCHEMA.md) | Every table and view, and why it exists |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | Architecture decision records, including rejected options |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Threat model, RBAC, PII handling, known gaps |
+| [`docs/OPERATIONS_MODEL.md`](docs/OPERATIONS_MODEL.md) | How work reaches a human; content gaps vs contact requests |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Operational procedures, go-live checklist |
 | [`docs/API.md`](docs/API.md) | Endpoint reference |
 | [`docs/EVALUATION.md`](docs/EVALUATION.md) | Measured results, latency, cost, and what they do not prove |
@@ -140,10 +143,11 @@ api/app/
   core/        config, db pool, hash-chained audit, RBAC, rate limiting
   retrieval/   local models + hybrid search
   kb/          ingestion, versioning, embedding refresh
-  chat/        prompts, orchestration, public streaming API
+  chat/        prompts, scope guard, orchestration, public streaming API
   admin/       staff console API
 infra/postgres/migrations/   numbered SQL, applied by scripts/migrate.sh
 widget/        chat UI, embed loader, demo host page
+console/       staff console (single self-contained HTML file)
 evals/         golden set + evaluation harness
 scripts/       generate seed KB, seed database, migrate
 docs/          the documents listed above

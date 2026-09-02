@@ -91,6 +91,35 @@
   .csat { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
   .csat .stars { display: flex; gap: 4px; margin-top: 8px; }
   .csat button { font-size: 20px; padding: 2px 6px; line-height: 1; }
+  .contact-card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px;
+  }
+  .contact-card h3 { margin: 0 0 4px; font-size: 14px; font-weight: 650; }
+  .contact-card p  { margin: 0 0 10px; font-size: 13px; color: var(--ink-soft); }
+  .field { margin-bottom: 9px; }
+  .field label { display: block; font-size: 12px; color: var(--ink-soft); margin-bottom: 3px; }
+  .field input {
+    width: 100%; font-family: var(--font); font-size: 14px; color: var(--ink);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  }
+  .field input:focus-visible { outline: 3px solid #7aa7d1; outline-offset: 1px; border-color: var(--brand); }
+  .choices { display: flex; gap: 14px; margin: 2px 0 4px; }
+  .choices label { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--ink); }
+  .form-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .form-actions .send { flex: 1; }
+  .err { color: #b3261e; font-size: 12px; margin-top: 6px; }
+  .ref {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 17px;
+    font-weight: 650; letter-spacing: .5px; color: var(--brand);
+    background: var(--bg); border: 1px dashed var(--brand); border-radius: 8px;
+    padding: 7px 11px; display: inline-block; margin: 8px 0;
+  }
+  .header-link {
+    margin-inline-start: auto; background: transparent; border: 1px solid rgba(255,255,255,.4);
+    color: #fff; font-size: 12px; padding: 5px 9px; border-radius: 8px;
+  }
+  .header-link:hover { background: rgba(255,255,255,.14); color: #fff; }
   .visually-hidden {
     position: absolute; width: 1px; height: 1px; overflow: hidden;
     clip: rect(0 0 0 0); white-space: nowrap;
@@ -104,6 +133,7 @@
     <div class="title">Dəstək köməkçisi</div>
     <div class="sub">Dövlət Satınalmaları Portalı</div>
   </div>
+  <button type="button" class="header-link" id="contactLink">💬 Operatorla əlaqə</button>
 </header>
 
 <!-- aria-live announces streamed answers to screen-reader users. "polite" so it
@@ -123,36 +153,32 @@
 (function () {
   "use strict";
 
-  const API = new URLSearchParams(location.search).get("api") || "";
-  const TENANT = new URLSearchParams(location.search).get("tenant") || "mof-contracts";
-
-  // One session per browser tab-group; conversation history is keyed on this.
-  const sessionId = (function () {
-    let s = null;
-    try { s = sessionStorage.getItem("sc_session"); } catch (e) { /* private mode */ }
-    if (!s) {
-      s = "s_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
-      try { sessionStorage.setItem("sc_session", s); } catch (e) { /* ignore */ }
-    }
-    return s;
-  })();
+  /* API origin is derived from where this page was served, NOT from a query
+     parameter. Reading it from the URL let anyone serve /widget?api=https://evil
+     and collect every question typed into the widget. */
+  const API = location.origin;
+  const params = new URLSearchParams(location.search);
+  const SITE_KEY = params.get("k") || "";
 
   const log = document.getElementById("log");
   const form = document.getElementById("form");
   const input = document.getElementById("input");
   const sendBtn = document.getElementById("send");
+  const contactLink = document.getElementById("contactLink");
+
+  let token = null;          // server-issued, signed; proves this conversation is ours
   let busy = false;
   let answered = 0;
+  let contactDone = false;
 
-  /* Escape first, then apply a deliberately tiny markdown subset. The model's
-     output is untrusted text; building HTML from it without escaping would be a
-     straightforward XSS hole. */
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, c => (
       { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
     ));
   }
 
+  /* Escape first, then apply a deliberately tiny markdown subset. Model output is
+     untrusted text; building HTML from it unescaped would be an XSS hole. */
   function renderMarkdown(text) {
     let html = escapeHtml(text);
     html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
@@ -179,32 +205,129 @@
     el.className = "msg user";
     el.innerHTML = '<div class="bubble"></div>';
     el.querySelector(".bubble").textContent = text;
-    log.appendChild(el);
-    scrollDown();
+    log.appendChild(el); scrollDown();
   }
 
   function addBot() {
     const el = document.createElement("div");
     el.className = "msg bot";
-    el.innerHTML =
-      '<div class="bubble"><span class="typing" aria-label="Cavab yazılır">' +
-      "<span></span><span></span><span></span></span></div>";
-    log.appendChild(el);
-    scrollDown();
+    el.innerHTML = '<div class="bubble"><span class="typing" aria-label="Cavab yazılır">' +
+                   "<span></span><span></span><span></span></span></div>";
+    log.appendChild(el); scrollDown();
     return el;
   }
 
-  async function post(path, body) {
-    const r = await fetch(API + path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
+  async function api(path, body) {
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = "Bearer " + token;
+    const r = await fetch(API + path, { method: "POST", headers, body: JSON.stringify(body) });
     if (!r.ok) throw new Error("HTTP " + r.status);
     return r.json();
   }
 
-  function addFooter(el, meta) {
+  async function ensureSession() {
+    if (token) return token;
+    const r = await fetch(API + "/api/chat/session", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ site_key: SITE_KEY })
+    });
+    if (!r.ok) throw new Error("session HTTP " + r.status);
+    token = (await r.json()).session_token;
+    return token;
+  }
+
+  /* ---------------------------------------------------------- contact form */
+  function showContactForm(trigger) {
+    if (contactDone) return;
+    if (document.querySelector(".contact-card")) {
+      document.querySelector(".contact-card input").focus();
+      return;
+    }
+    const el = document.createElement("div");
+    el.className = "msg bot";
+    el.innerHTML =
+      '<div class="contact-card">' +
+        "<h3>💬 Operatorla əlaqə</h3>" +
+        "<p>Əlaqə məlumatlarınızı qeyd edin — operatorumuz sizinlə əlaqə saxlayacaq.</p>" +
+        '<div class="field"><label for="cName">Ad, soyad</label>' +
+          '<input id="cName" autocomplete="name" maxlength="120"></div>' +
+        '<div class="field"><label id="chLabel">Əlaqə üsulu</label>' +
+          '<div class="choices" role="radiogroup" aria-labelledby="chLabel">' +
+            '<label><input type="radio" name="ch" value="phone" checked> Telefon</label>' +
+            '<label><input type="radio" name="ch" value="email"> E-poçt</label>' +
+          "</div></div>" +
+        '<div class="field" id="phoneField"><label for="cPhone">Telefon nömrəsi</label>' +
+          '<input id="cPhone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+994 __ ___ __ __"></div>' +
+        '<div class="field" id="emailField" style="display:none"><label for="cEmail">E-poçt</label>' +
+          '<input id="cEmail" type="email" autocomplete="email" placeholder="ad@nümunə.az"></div>' +
+        '<div class="field"><label for="cNote">Qeyd (istəyə bağlı)</label>' +
+          '<input id="cNote" maxlength="2000" placeholder="Nə ilə bağlı kömək lazımdır?"></div>' +
+        '<div class="form-actions">' +
+          '<button type="button" class="send" id="cSend">Göndər</button>' +
+          '<button type="button" id="cCancel">Ləğv et</button>' +
+        "</div>" +
+        '<div class="err" id="cErr" role="alert" style="display:none"></div>' +
+      "</div>";
+    log.appendChild(el); scrollDown();
+
+    const card = el.querySelector(".contact-card");
+    const phoneField = card.querySelector("#phoneField");
+    const emailField = card.querySelector("#emailField");
+    const err = card.querySelector("#cErr");
+
+    card.querySelectorAll('input[name="ch"]').forEach(radio => {
+      radio.addEventListener("change", () => {
+        const phone = card.querySelector('input[name="ch"]:checked').value === "phone";
+        phoneField.style.display = phone ? "" : "none";
+        emailField.style.display = phone ? "none" : "";
+      });
+    });
+
+    card.querySelector("#cCancel").onclick = () => { el.remove(); input.focus(); };
+
+    card.querySelector("#cSend").onclick = async () => {
+      const name = card.querySelector("#cName").value.trim();
+      const channel = card.querySelector('input[name="ch"]:checked').value;
+      const phone = card.querySelector("#cPhone").value.trim();
+      const email = card.querySelector("#cEmail").value.trim();
+      const note = card.querySelector("#cNote").value.trim();
+
+      const fail = (m) => { err.textContent = m; err.style.display = ""; };
+      if (name.length < 2) return fail("Zəhmət olmasa ad və soyadınızı yazın.");
+      if (channel === "phone" && phone.length < 7) return fail("Zəhmət olmasa telefon nömrənizi yazın.");
+      if (channel === "email" && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+        return fail("Zəhmət olmasa düzgün e-poçt ünvanı yazın.");
+      }
+      err.style.display = "none";
+      card.querySelector("#cSend").disabled = true;
+
+      try {
+        const res = await api("/api/chat/contact", {
+          name: name, channel: channel,
+          phone: phone || null, email: email || null,
+          note: note || (trigger || null)
+        });
+        contactDone = true;
+        contactLink.style.display = "none";
+        card.innerHTML =
+          "<h3>✅ Müraciətiniz qeydə alındı</h3>" +
+          "<p>Operatorumuz ən qısa zamanda sizinlə əlaqə saxlayacaq.</p>" +
+          '<div class="ref">' + escapeHtml(res.reference_code) + "</div>" +
+          "<p>Bu nömrəni yadda saxlayın — müraciətinizlə bağlı sorğu zamanı lazım ola bilər.</p>";
+        scrollDown();
+      } catch (e) {
+        card.querySelector("#cSend").disabled = false;
+        fail("Göndərmək alınmadı. Zəhmət olmasa yenidən cəhd edin.");
+      }
+    };
+
+    card.querySelector("#cName").focus();
+  }
+
+  contactLink.addEventListener("click", () => showContactForm(null));
+
+  /* ------------------------------------------------------------- answering */
+  function addFooter(el, meta, question) {
     const bubble = el.querySelector(".bubble");
 
     if (meta.sources && meta.sources.length) {
@@ -217,80 +340,79 @@
     const actions = document.createElement("div");
     actions.className = "actions";
 
-    if (meta.message_id) {
+    /* Ratings only on real answers. Asking someone to rate a refusal measures
+       nothing useful and just adds noise to the queue. */
+    if (meta.message_id && meta.mode === "grounded") {
       [["👍", 1, "Faydalı oldu"], ["👎", -1, "Faydalı olmadı"]].forEach(([icon, value, label]) => {
         const b = document.createElement("button");
-        b.type = "button";
-        b.textContent = icon;
+        b.type = "button"; b.textContent = icon;
         b.setAttribute("aria-label", label);
         b.setAttribute("aria-pressed", "false");
         b.onclick = async () => {
           actions.querySelectorAll("[aria-pressed]").forEach(x => x.setAttribute("aria-pressed", "false"));
           b.setAttribute("aria-pressed", "true");
-          try { await post("/api/chat/rate", { message_id: meta.message_id, value: value }); }
+          try { await api("/api/chat/rate", { message_id: meta.message_id, value: value }); }
           catch (e) { /* a failed rating must not break the conversation */ }
+          /* Two thumbs-down in a row means the bot is not helping. Offer a human
+             rather than letting the user keep trying. */
+          if (value === -1 && ++negatives >= 2) showContactForm(question);
         };
         actions.appendChild(b);
       });
     }
 
-    const esc = document.createElement("button");
-    esc.type = "button";
-    esc.className = "escalate";
-    esc.textContent = "💬 Dəstəyə yaz";
-    esc.onclick = async () => {
-      esc.disabled = true;
-      try {
-        await post("/api/chat/escalate", { session_id: sessionId, message_id: meta.message_id || null });
-        esc.textContent = "✅ Dəstəyə göndərildi";
-      } catch (e) { esc.textContent = "⚠️ Alınmadı"; esc.disabled = false; }
-    };
-    actions.appendChild(esc);
-    bubble.appendChild(actions);
+    /* The handover is offered when the bot actually fell short — not under every
+       answer. A permanent "contact support" button beneath every reply signals no
+       confidence in the bot and trains people to skip straight past it. */
+    if (meta.offer_contact && !contactDone) {
+      const esc = document.createElement("button");
+      esc.type = "button"; esc.className = "escalate";
+      esc.textContent = "💬 Operatorla əlaqə";
+      esc.onclick = () => showContactForm(question);
+      actions.appendChild(esc);
+    }
 
-    // Ask for a rating once, after the conversation has actually gone somewhere.
-    if (++answered === 3) setTimeout(showCsat, 900);
+    if (actions.children.length) bubble.appendChild(actions);
+    if (meta.mode === "grounded" && ++answered === 3) setTimeout(showCsat, 900);
   }
+
+  let negatives = 0;
 
   function showCsat() {
     if (document.querySelector(".csat")) return;
     const el = document.createElement("div");
     el.className = "msg bot";
-    el.innerHTML =
-      '<div class="csat"><div>⭐ Bu söhbət nə dərəcədə faydalı oldu?</div>' +
+    el.innerHTML = '<div class="csat"><div>⭐ Bu söhbət nə dərəcədə faydalı oldu?</div>' +
       '<div class="stars" role="group" aria-label="Qiymətləndirmə, 1-dən 5-ə"></div></div>';
     const stars = el.querySelector(".stars");
     for (let i = 1; i <= 5; i++) {
       const b = document.createElement("button");
-      b.type = "button";
-      b.textContent = "☆";
+      b.type = "button"; b.textContent = "☆";
       b.setAttribute("aria-label", i + " ulduz");
       b.onclick = async () => {
         Array.from(stars.children).forEach((c, idx) => { c.textContent = idx < i ? "★" : "☆"; });
-        try { await post("/api/chat/csat", { session_id: sessionId, score: i }); } catch (e) {}
+        try { await api("/api/chat/csat", { score: i }); } catch (e) {}
         el.querySelector(".csat").insertAdjacentHTML("beforeend",
           '<div style="margin-top:8px;font-size:13px">Təşəkkür edirik! 🙏</div>');
       };
       stars.appendChild(b);
     }
-    log.appendChild(el);
-    scrollDown();
+    log.appendChild(el); scrollDown();
   }
 
-  /* Server-Sent Events over fetch rather than EventSource: EventSource cannot
-     issue a POST, and the question has to go in a request body. */
+  /* SSE over fetch rather than EventSource: EventSource cannot POST, and both the
+     question and the bearer token have to travel in the request. */
   async function ask(text) {
     const el = addBot();
     const bubble = el.querySelector(".bubble");
-    let acc = "";
-    let meta = {};
-    let started = false;
+    let acc = "", meta = {}, started = false;
 
     try {
+      await ensureSession();
       const resp = await fetch(API + "/api/chat/stream", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, message: text, tenant: TENANT })
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+        body: JSON.stringify({ message: text })
       });
       if (!resp.ok || !resp.body) throw new Error("HTTP " + resp.status);
 
@@ -302,11 +424,8 @@
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-
-        // SSE frames are separated by a blank line.
         const frames = buffer.split("\n\n");
         buffer = frames.pop() || "";
-
         for (const frame of frames) {
           let event = "message";
           const dataLines = [];
@@ -315,7 +434,6 @@
             else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
           }
           const data = dataLines.join("\n");
-
           if (event === "token") {
             if (!started) { bubble.innerHTML = ""; started = true; }
             acc += data;
@@ -333,7 +451,7 @@
     }
 
     if (!started && !acc) bubble.innerHTML = renderMarkdown("⚠️ Cavab alınmadı.");
-    addFooter(el, meta);
+    addFooter(el, meta, text);
     scrollDown();
   }
 
@@ -341,18 +459,13 @@
     e.preventDefault();
     const text = input.value.trim();
     if (!text || busy) return;
-    busy = true;
-    sendBtn.disabled = true;
-    input.value = "";
-    input.style.height = "auto";
+    busy = true; sendBtn.disabled = true;
+    input.value = ""; input.style.height = "auto";
     addUser(text);
     await ask(text);
-    busy = false;
-    sendBtn.disabled = false;
-    input.focus();
+    busy = false; sendBtn.disabled = false; input.focus();
   });
 
-  // Enter sends, Shift+Enter makes a new line.
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
   });
@@ -361,7 +474,6 @@
     input.style.height = Math.min(input.scrollHeight, 120) + "px";
   });
 
-  // Opening greeting.
   const hello = addBot();
   hello.querySelector(".bubble").innerHTML = renderMarkdown(
     "👋 Salam! Mən Dövlət Satınalmaları Portalının dəstək köməkçisiyəm.\n\n" +

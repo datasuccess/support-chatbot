@@ -40,26 +40,40 @@ Full KB lifecycle with four-eyes approval, review queue with retrieval diagnosti
 promote-conversation-to-KB, analytics endpoints, audit read and chain verification,
 staff management.
 
-**Gap:** API only. No console UI — staff currently work through `/docs` or curl.
+## ✅ Phase 5b — Staff console
+Single self-contained HTML page at `/console` (ADR-016). Operator queue split into
+contact requests and content gaps, KB CRUD with version history, approvals with
+four-eyes, analytics, attribution, activity feed, staff management, widget
+integration settings.
 
-## ✅ Phase 6 — Security foundations
+## ✅ Phase 6 — Security
 Argon2id passwords, `httpOnly` sessions with revocation, three-role RBAC, four-eyes
-on identity, sliding-window rate limiting, CORS allow-list, hash-chained
-append-only audit, IP hashing, XSS-safe rendering.
+on identity, sliding-window rate limiting, hash-chained append-only audit, IP
+hashing, XSS-safe rendering.
+
+Hardened after a pre-handover probe found 8 holes — signed conversation tokens,
+server-side site keys, trusted-proxy IP resolution, per-account lockout. All are
+now regression tests: **25 attacks blocked, 0 vulnerable**. See `SECURITY.md`.
 
 ## ✅ Phase 7 — Analytics
 Seven views: volume, deflection, satisfaction, entry usage, content gaps, cost,
 KB health. Exposed through manager-only endpoints.
 
-**Gap:** no dashboard UI.
+Plus attribution: who wrote what, who approved what, operator workload, activity
+feed, refusal monitoring. All surfaced in the console.
 
 ---
 
 ## ✅ Testing
-`scripts/smoke_test.py` — 37 end-to-end checks: streaming chat, multi-turn,
-out-of-scope escalation, ratings, CSAT, RBAC boundaries, full KB lifecycle,
-four-eyes enforcement, review queue, promote-to-KB, analytics, audit chain
-verification, widget assets. **37 passed, 0 failed.**
+`scripts/smoke_test.py` — **59 passed, 0 failed**: streaming chat, multi-turn,
+scope refusal, ratings, CSAT, contact requests with reference codes, RBAC
+boundaries, KB lifecycle, four-eyes, duplicate rejection, review queue,
+promote-to-KB, attribution analytics, audit chain, widget and console assets.
+
+`scripts/security_test.py` — **25 attacks blocked, 0 vulnerable**: site-key
+forgery, conversation hijack, cross-conversation rating, token forgery, scope
+enforcement (political / off-topic / other participants' data / prompt injection),
+queue hygiene, account lockout, admin surface authentication.
 
 ---
 
@@ -95,11 +109,10 @@ observability. `external_id` + `content_hash` already make re-syncs idempotent.
 
 | Thing | Why |
 |---|---|
-| Console UI | API-first was the right order; the UI is a known, well-understood build |
 | Answer caching | No measured need at current traffic |
 | Multi-worker deployment | In-memory rate limiter assumes one process |
 | Self-hosted generation | No GPU, and CPU generation in Azerbaijani is not viable |
-| Ticketing integration | The target system was never named |
+| Ticketing integration | The target system was never named — contact requests live in the console for now |
 | Russian / English | Stakeholder confirmed Azerbaijani only |
 
 ---

@@ -40,16 +40,47 @@ def verify_password(raw: str, hashed: str) -> bool:
 
 
 async def authenticate(tenant_id: int, email: str, password: str) -> dict | None:
+    """Verify credentials, with per-account lockout.
+
+    Per-IP rate limiting alone does not stop a distributed brute force against one
+    account: an attacker with a hundred addresses gets a hundred times the budget.
+    Lockout is keyed on the account, so it holds regardless of where attempts come
+    from.
+    """
     user = await fetch_one(
-        """SELECT id, tenant_id, email, full_name, role, password_hash, is_active
+        """SELECT id, tenant_id, email, full_name, role, password_hash, is_active,
+                  failed_login_attempts, locked_until
            FROM staff_users WHERE tenant_id = %s AND lower(email) = lower(%s)""",
         (tenant_id, email),
     )
     if not user or not user["is_active"]:
         return None
-    if not verify_password(password, user["password_hash"]):
+
+    if user["locked_until"] and user["locked_until"] > datetime.now(timezone.utc):
         return None
-    await execute("UPDATE staff_users SET last_login_at = now() WHERE id = %s", (user["id"],))
+
+    if not verify_password(password, user["password_hash"]):
+        attempts = (user["failed_login_attempts"] or 0) + 1
+        if attempts >= settings.max_failed_logins:
+            await execute(
+                """UPDATE staff_users
+                   SET failed_login_attempts = %s, locked_until = now() + (%s || ' minutes')::interval
+                   WHERE id = %s""",
+                (attempts, settings.lockout_minutes, user["id"]),
+            )
+        else:
+            await execute(
+                "UPDATE staff_users SET failed_login_attempts = %s WHERE id = %s",
+                (attempts, user["id"]),
+            )
+        return None
+
+    await execute(
+        """UPDATE staff_users
+           SET last_login_at = now(), failed_login_attempts = 0, locked_until = NULL
+           WHERE id = %s""",
+        (user["id"],),
+    )
     return user
 
 

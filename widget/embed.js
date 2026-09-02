@@ -3,7 +3,12 @@
  *
  * Host applications include a single tag:
  *   <script src="https://<api-host>/static/embed.js"
- *           data-api="https://<api-host>" data-tenant="mof-contracts" defer></script>
+ *           data-site-key="<public site key>" defer></script>
+ *
+ * The API origin is taken from this script's own src, so the host page cannot
+ * accidentally (or maliciously) point the widget somewhere else. The site key is
+ * public by design — it identifies the tenant so the API can apply per-tenant
+ * origin rules and rate limits. It is not a secret and grants no data access.
  *
  * The chat UI is rendered inside an iframe rather than injected into the host
  * page. That isolates the host's CSS from ours in both directions — a widget that
@@ -14,8 +19,14 @@
   "use strict";
 
   var script = document.currentScript;
-  var api = (script && script.getAttribute("data-api")) || "";
-  var tenant = (script && script.getAttribute("data-tenant")) || "mof-contracts";
+  var siteKey = (script && script.getAttribute("data-site-key")) || "";
+  // Derive the API origin from where this script was loaded from.
+  var api = "";
+  try {
+    api = new URL(script.src, location.href).origin;
+  } catch (e) {
+    api = location.origin;
+  }
   var LABEL_OPEN = "Dəstək köməkçisini aç";
   var LABEL_CLOSE = "Dəstək köməkçisini bağla";
 
@@ -33,7 +44,7 @@
 
   var frame = document.createElement("iframe");
   frame.title = "Dəstək köməkçisi";
-  frame.src = api + "/widget?api=" + encodeURIComponent(api) + "&tenant=" + encodeURIComponent(tenant);
+  frame.src = api + "/widget?k=" + encodeURIComponent(siteKey);
   frame.style.cssText = [
     "position:fixed", "inset-inline-end:20px", "inset-block-end:88px", "z-index:2147483000",
     "width:390px", "height:min(620px, calc(100vh - 120px))", "border:none",

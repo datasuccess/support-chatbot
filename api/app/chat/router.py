@@ -1,21 +1,36 @@
-"""Public widget API: streaming chat, ratings, CSAT and escalation.
+"""Public widget API: session issuing, streaming chat, ratings, contact requests.
 
-These endpoints are unauthenticated by design — the widget is embedded in the host
-application and end users are anonymous. Protection is origin allow-listing plus
-per-session rate limiting, not user identity.
+Authorisation model
+-------------------
+End users are anonymous, so there is no login. Authority instead comes from two
+things the caller cannot forge:
+
+* a per-tenant **site key**, identifying which widget is calling. Checked
+  server-side, because CORS is enforced by the browser and does nothing against a
+  direct HTTP client.
+* a **signed session token** committing to one conversation id. Every endpoint
+  derives its conversation from the token, so "which conversation am I acting on"
+  is never a caller-supplied parameter.
+
+An earlier version trusted a client-supplied `session_id`, which allowed posting
+into another user's conversation, reading their history into the LLM context, and
+overwriting their ratings. Ownership is now structural rather than assumed.
 """
 import hashlib
 import json
 import logging
+import secrets
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.chat import service
+from app.core import session_token
 from app.core.config import settings
-from app.core.db import connection, fetch_one, fetch_all, execute
+from app.core.db import connection, execute, fetch_all, fetch_one
+from app.core.net import client_ip
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -24,11 +39,14 @@ MAX_MESSAGE_CHARS = 2000
 HISTORY_TURNS = 6
 
 
-class ChatRequest(BaseModel):
-    session_id: str = Field(min_length=8, max_length=128)
-    message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)
-    tenant: str | None = None
+# ------------------------------------------------------------------ schemas
+class SessionRequest(BaseModel):
+    site_key: str = Field(min_length=8, max_length=128)
     external_ref: str | None = Field(default=None, max_length=128)
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)
 
 
 class RateRequest(BaseModel):
@@ -38,91 +56,164 @@ class RateRequest(BaseModel):
 
 
 class CsatRequest(BaseModel):
-    session_id: str
     score: int = Field(ge=1, le=5)
     comment: str | None = Field(default=None, max_length=1000)
 
 
-class EscalateRequest(BaseModel):
-    session_id: str
+class ContactRequest(BaseModel):
+    """A person asking an operator to get back to them.
+
+    Contact details are required — an operator cannot act on a request with no way
+    to reach the person, and a queue full of unanswerable tickets is worse than an
+    empty one.
+    """
+    name: str = Field(min_length=2, max_length=120)
+    channel: str = Field(pattern="^(phone|email)$")
+    phone: str | None = Field(default=None, max_length=40)
+    email: str | None = Field(default=None, max_length=200)
     note: str | None = Field(default=None, max_length=2000)
-    message_id: int | None = None
 
 
+# ------------------------------------------------------------------ helpers
 def _hash_ip(request: Request) -> str:
-    """Store a salted hash, never the address itself — PII minimisation."""
-    ip = request.client.host if request.client else ""
-    return hashlib.sha256(f"{settings.auth_session_secret}|{ip}".encode()).hexdigest()[:32]
+    """Salted, truncated hash — the address itself is never stored."""
+    return hashlib.sha256(
+        f"{settings.auth_session_secret}|{client_ip(request)}".encode()
+    ).hexdigest()[:32]
 
 
-async def _tenant(slug: str | None) -> dict:
+def _origin_of(request: Request) -> str | None:
+    origin = request.headers.get("origin")
+    if origin:
+        return origin.rstrip("/")
+    referer = request.headers.get("referer")
+    if referer:
+        parts = referer.split("/")
+        if len(parts) >= 3:
+            return f"{parts[0]}//{parts[2]}"
+    return None
+
+
+async def _tenant_by_site_key(site_key: str, request: Request) -> dict:
+    tenant = await fetch_one(
+        """SELECT id, slug, name, scope_desc, allowed_origins
+           FROM tenants WHERE site_key = %s AND is_active""",
+        (site_key,),
+    )
+    if not tenant:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid site key")
+
+    # Server-side origin check. Weak on its own (an attacker sets any header they
+    # like) but it stops the widget being embedded on unauthorised sites, which
+    # CORS alone cannot do for non-browser callers.
+    allowed = tenant["allowed_origins"] or []
+    if allowed:
+        origin = _origin_of(request)
+        if origin and origin not in allowed:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Origin not allowed for this site key")
+    return tenant
+
+
+async def _conversation(authorization: str | None) -> dict:
+    """Resolve the bearer token to a conversation. This is the ownership check."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing session token")
+    claims = session_token.verify(authorization[7:].strip())
+    if not claims:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired session token")
+
+    conv = await fetch_one(
+        """SELECT c.id, c.tenant_id, c.session_id,
+                  t.name AS tenant_name, t.scope_desc
+           FROM conversations c JOIN tenants t ON t.id = c.tenant_id
+           WHERE c.id = %s::uuid""",
+        (claims["cid"],),
+    )
+    if not conv or conv["tenant_id"] != claims["tid"]:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Conversation not found")
+    return conv
+
+
+async def _owned_message(conversation_id, message_id: int) -> dict:
+    """Confirm a message belongs to the caller's conversation.
+
+    Without this, /rate and /csat accepted any id in the database — which the
+    security probe used to rate and escalate other users' messages.
+    """
     row = await fetch_one(
-        "SELECT id, slug, name, scope_desc FROM tenants WHERE slug = %s AND is_active",
-        (slug or settings.default_tenant,),
+        """SELECT id FROM messages
+           WHERE id = %s AND conversation_id = %s AND role = 'assistant'""",
+        (message_id, conversation_id),
     )
     if not row:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown tenant")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Message not found in this conversation")
     return row
 
 
-async def _get_or_create_conversation(tenant: dict, req: ChatRequest, request: Request) -> str:
-    row = await fetch_one(
-        """SELECT id FROM conversations
-           WHERE tenant_id = %s AND session_id = %s
-           ORDER BY started_at DESC LIMIT 1""",
-        (tenant["id"], req.session_id),
-    )
-    if row:
-        await execute("UPDATE conversations SET last_at = now() WHERE id = %s", (row["id"],))
-        return str(row["id"])
-    created = await fetch_one(
-        """INSERT INTO conversations (tenant_id, session_id, external_ref, user_agent, ip_hash)
-           VALUES (%s, %s, %s, %s, %s) RETURNING id""",
-        (tenant["id"], req.session_id, req.external_ref,
-         request.headers.get("user-agent", "")[:400], _hash_ip(request)),
-    )
-    return str(created["id"])
-
-
-async def _history(conversation_id: str) -> list[dict]:
+async def _history(conversation_id) -> list[dict]:
     rows = await fetch_all(
         """SELECT role::text AS role, content FROM messages
-           WHERE conversation_id = %s::uuid AND role IN ('user','assistant')
+           WHERE conversation_id = %s AND role IN ('user','assistant')
            ORDER BY created_at DESC LIMIT %s::int""",
         (conversation_id, HISTORY_TURNS),
     )
     return list(reversed(rows))
 
 
-async def _add_message(conversation_id: str, role: str, content: str) -> int:
+async def _add_message(conversation_id, role: str, content: str) -> int:
     row = await fetch_one(
         """INSERT INTO messages (conversation_id, role, content)
-           VALUES (%s::uuid, %s::message_role, %s) RETURNING id""",
+           VALUES (%s, %s::message_role, %s) RETURNING id""",
         (conversation_id, role, content),
     )
     return row["id"]
 
 
 def _sse(event: str, data: str) -> str:
-    # Newlines must be escaped per line or the SSE frame terminates early.
     payload = "\n".join(f"data: {line}" for line in data.split("\n"))
     return f"event: {event}\n{payload}\n\n"
 
 
+def _reference_code() -> str:
+    """Short, unambiguous code the user can quote when following up."""
+    alphabet = "ACDEFGHJKLMNPQRTUVWXY34789"  # no look-alike characters
+    return "DS-" + "".join(secrets.choice(alphabet) for _ in range(6))
+
+
+# ----------------------------------------------------------------- endpoints
+@router.post("/session")
+async def create_session(req: SessionRequest, request: Request) -> dict:
+    """Start a conversation and return its signed token."""
+    tenant = await _tenant_by_site_key(req.site_key, request)
+    conv = await fetch_one(
+        """INSERT INTO conversations (tenant_id, session_id, external_ref, user_agent, ip_hash)
+           VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+        (tenant["id"], secrets.token_urlsafe(18), req.external_ref,
+         request.headers.get("user-agent", "")[:400], _hash_ip(request)),
+    )
+    return {
+        "session_token": session_token.issue(str(conv["id"]), tenant["id"]),
+        "tenant_name": tenant["name"],
+    }
+
+
 @router.post("/stream")
-async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
-    tenant = await _tenant(req.tenant)
-    conversation_id = await _get_or_create_conversation(tenant, req, request)
-    history = await _history(conversation_id)
-    await _add_message(conversation_id, "user", req.message)
+async def chat_stream(
+    req: ChatRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> StreamingResponse:
+    conv = await _conversation(authorization)
+    tenant = {"id": conv["tenant_id"], "name": conv["tenant_name"],
+              "scope_desc": conv["scope_desc"]}
+
+    history = await _history(conv["id"])
+    await _add_message(conv["id"], "user", req.message)
+    await execute("UPDATE conversations SET last_at = now() WHERE id = %s", (conv["id"],))
 
     ctx = await service.prepare(tenant["id"], history, req.message)
 
     async def generator() -> AsyncIterator[str]:
-        # Tell the widget which conversation this is before any tokens arrive,
-        # so it can attach ratings and escalations without waiting.
-        yield _sse("meta", json.dumps({"conversation_id": conversation_id}))
-
         collected: list[str] = []
         meta: dict = {}
         try:
@@ -134,18 +225,35 @@ async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                     meta = json.loads(data)
         finally:
             answer = "".join(collected)
-            message_id = await _add_message(conversation_id, "assistant", answer)
+            message_id = await _add_message(conv["id"], "assistant", answer)
             await service.persist_trace(message_id, ctx, meta)
 
-            # Low confidence opens an escalation automatically, so the support
-            # team sees the gap even if the user simply gives up and leaves.
-            if ctx.escalate:
+            if ctx.mode == "refused":
+                # Out of scope. Logged for abuse monitoring, but deliberately NOT
+                # turned into an operator task — nobody owes this person a call.
                 await execute(
-                    """INSERT INTO escalations (tenant_id, conversation_id, message_id, reason)
-                       VALUES (%s, %s::uuid, %s, 'low_confidence')""",
-                    (tenant["id"], conversation_id, message_id),
+                    """INSERT INTO refusals (tenant_id, conversation_id, message_id,
+                                             question, category, confidence)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                    (tenant["id"], conv["id"], message_id, req.message,
+                     ctx.refusal_category or "out_of_scope", ctx.retrieval.confidence),
                 )
+            elif ctx.mode == "escalated":
+                # In scope, but the knowledge base is missing something. An
+                # internal content gap — still not an operator task.
+                await execute(
+                    """INSERT INTO escalations (tenant_id, conversation_id, message_id,
+                                                reason, kind)
+                       VALUES (%s, %s, %s, 'low_confidence', 'content_gap')""",
+                    (tenant["id"], conv["id"], message_id),
+                )
+
             meta["message_id"] = message_id
+            meta["mode"] = ctx.mode
+            # Only invite a handover when the bot actually fell short. Offering it
+            # under every answer signals no confidence in the bot and trains users
+            # to skip it entirely.
+            meta["offer_contact"] = ctx.mode in ("escalated", "refused")
             yield _sse("done", json.dumps(meta, ensure_ascii=False))
 
     return StreamingResponse(
@@ -156,7 +264,10 @@ async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
 
 
 @router.post("/rate")
-async def rate(req: RateRequest) -> dict:
+async def rate(req: RateRequest, authorization: str | None = Header(default=None)) -> dict:
+    conv = await _conversation(authorization)
+    await _owned_message(conv["id"], req.message_id)
+
     async with connection() as conn:
         await conn.execute(
             """INSERT INTO ratings (message_id, value, comment) VALUES (%s, %s, %s)
@@ -164,42 +275,72 @@ async def rate(req: RateRequest) -> dict:
                SET value = EXCLUDED.value, comment = EXCLUDED.comment""",
             (req.message_id, req.value, req.comment),
         )
-        # A thumbs-down is a content gap the support team should see.
         if req.value == -1:
+            # A thumbs-down is a content gap, not a request to be called back.
             await conn.execute(
-                """INSERT INTO escalations (tenant_id, conversation_id, message_id, reason)
-                   SELECT c.tenant_id, c.id, m.id, 'negative_rating'
-                   FROM messages m JOIN conversations c ON c.id = m.conversation_id
-                   WHERE m.id = %s""",
-                (req.message_id,),
+                """INSERT INTO escalations (tenant_id, conversation_id, message_id,
+                                            reason, kind)
+                   VALUES (%s, %s, %s, 'negative_rating', 'content_gap')""",
+                (conv["tenant_id"], conv["id"], req.message_id),
             )
     return {"ok": True}
 
 
 @router.post("/csat")
-async def csat(req: CsatRequest) -> dict:
+async def csat(req: CsatRequest, authorization: str | None = Header(default=None)) -> dict:
+    conv = await _conversation(authorization)
     await execute(
         """UPDATE conversations SET csat = %s, csat_comment = %s, csat_at = now()
-           WHERE session_id = %s""",
-        (req.score, req.comment, req.session_id),
+           WHERE id = %s""",
+        (req.score, req.comment, conv["id"]),
     )
     return {"ok": True}
 
 
-@router.post("/escalate")
-async def escalate(req: EscalateRequest) -> dict:
-    """The 'Dəstəyə yaz' button. Hands the whole transcript to a human so the
-    user never has to repeat themselves."""
-    conv = await fetch_one(
-        """SELECT id, tenant_id FROM conversations
-           WHERE session_id = %s ORDER BY started_at DESC LIMIT 1""",
-        (req.session_id,),
+@router.post("/contact")
+async def contact(
+    req: ContactRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """"Operatorla əlaqə" — the user asks a human to get back to them.
+
+    Creates a real operator task carrying the full transcript, so the person never
+    has to repeat their question, and returns a reference code so they can see the
+    request landed somewhere.
+    """
+    conv = await _conversation(authorization)
+
+    if req.channel == "phone" and not req.phone:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Phone number required")
+    if req.channel == "email" and not req.email:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Email required")
+
+    # One open request per conversation: clicking twice should not create two
+    # tickets for the same person.
+    existing = await fetch_one(
+        """SELECT id, reference_code FROM escalations
+           WHERE conversation_id = %s AND kind = 'contact_request'
+             AND status IN ('open','in_progress')
+           ORDER BY created_at DESC LIMIT 1""",
+        (conv["id"],),
     )
-    if not conv:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversation not found")
+    if existing:
+        return {"ok": True, "reference_code": existing["reference_code"], "duplicate": True}
+
+    last_message = await fetch_one(
+        """SELECT id FROM messages WHERE conversation_id = %s AND role = 'assistant'
+           ORDER BY created_at DESC LIMIT 1""",
+        (conv["id"],),
+    )
+    code = _reference_code()
     row = await fetch_one(
-        """INSERT INTO escalations (tenant_id, conversation_id, message_id, reason, contact_note)
-           VALUES (%s, %s, %s, 'user_request', %s) RETURNING id""",
-        (conv["tenant_id"], conv["id"], req.message_id, req.note),
+        """INSERT INTO escalations
+               (tenant_id, conversation_id, message_id, reason, kind, reference_code,
+                contact_name, contact_phone, contact_email, preferred_channel, contact_note)
+           VALUES (%s, %s, %s, 'user_request', 'contact_request', %s, %s, %s, %s, %s, %s)
+           RETURNING id""",
+        (conv["tenant_id"], conv["id"], last_message["id"] if last_message else None,
+         code, req.name, req.phone, req.email, req.channel, req.note),
     )
-    return {"ok": True, "escalation_id": row["id"]}
+    log.info("contact request %s created (escalation %s)", code, row["id"])
+    return {"ok": True, "reference_code": code, "duplicate": False}

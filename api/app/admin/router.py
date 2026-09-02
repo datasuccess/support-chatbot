@@ -11,6 +11,7 @@ only names the additional roles that may reach it.
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from psycopg.errors import UniqueViolation
 from pydantic import BaseModel, Field
 
 from app.core import audit, security
@@ -146,16 +147,43 @@ async def get_entry(entry_id: int, user: dict = Depends(require_roles("support",
     return row
 
 
+async def _reject_duplicate(tenant_id: int, question: str, answer: str) -> str:
+    """Fail fast on identical content.
+
+    The (tenant, source, external_id) constraint exists so re-imports update rather
+    than duplicate. Manual creation hits it too, which is desirable — near-identical
+    entries actively degrade retrieval by splitting the signal between them — but it
+    must surface as a clear 409 naming the existing entry, not a raw 500 that leaves
+    the author with no idea what happened.
+    """
+    chash = ingest.content_hash(question, answer)
+    existing = await fetch_one(
+        "SELECT id, status::text AS status FROM kb_entries WHERE tenant_id=%s AND content_hash=%s",
+        (tenant_id, chash),
+    )
+    if existing:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"An entry with identical content already exists "
+            f"(#{existing['id']}, status: {existing['status']}). Edit that one instead.",
+        )
+    return chash
+
+
 @router.post("/kb", status_code=status.HTTP_201_CREATED)
 async def create_entry(req: EntryCreate, user: dict = Depends(require_roles("support"))) -> dict:
-    chash = ingest.content_hash(req.question, req.answer)
-    row = await fetch_one(
-        """INSERT INTO kb_entries (tenant_id, question, answer, category, tags, citation,
-                                   status, source, external_id, content_hash, created_by)
-           VALUES (%s,%s,%s,%s,%s,%s,'draft','manual',%s,%s,%s) RETURNING id""",
-        (user["tenant_id"], req.question, req.answer, req.category, req.tags,
-         req.citation, chash[:24], chash, user["id"]),
-    )
+    chash = await _reject_duplicate(user["tenant_id"], req.question, req.answer)
+    try:
+        row = await fetch_one(
+            """INSERT INTO kb_entries (tenant_id, question, answer, category, tags, citation,
+                                       status, source, external_id, content_hash, created_by)
+               VALUES (%s,%s,%s,%s,%s,%s,'draft','manual',%s,%s,%s) RETURNING id""",
+            (user["tenant_id"], req.question, req.answer, req.category, req.tags,
+             req.citation, chash[:24], chash, user["id"]),
+        )
+    except UniqueViolation:
+        # Lost a race with a concurrent create of the same content.
+        raise HTTPException(status.HTTP_409_CONFLICT, "Identical entry created concurrently")
     await audit.record(
         action="kb.create", entity_type="kb_entry", entity_id=row["id"],
         tenant_id=user["tenant_id"], actor_id=user["id"], actor_label=user["email"],
@@ -193,6 +221,16 @@ async def update_entry(
         (entry_id, current["version"], current["question"], current["answer"],
          current["status"], current["citation"], user["id"], req.change_note),
     )
+    clash = await fetch_one(
+        """SELECT id FROM kb_entries
+           WHERE tenant_id=%s AND content_hash=%s AND id <> %s""",
+        (user["tenant_id"], ingest.content_hash(merged["question"], merged["answer"]), entry_id),
+    )
+    if clash:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"These edits would duplicate entry #{clash['id']}",
+        )
     await execute(
         """UPDATE kb_entries
            SET question=%s, answer=%s, category=%s, tags=%s, citation=%s,
@@ -343,10 +381,25 @@ class PromoteRequest(BaseModel):
 async def list_escalations(
     user: dict = Depends(require_roles("support", "manager")),
     status_filter: str = Query(default="open", alias="status"),
+    kind: str | None = Query(default=None, description="contact_request | content_gap"),
     limit: int = Query(default=50, le=200),
 ) -> dict:
+    """The operator queue.
+
+    `kind` matters: a `contact_request` is a person waiting for a call, a
+    `content_gap` is a missing article. They have different urgency and different
+    owners, so the UI lists them separately and contact requests sort first.
+    """
+    where = ["e.tenant_id = %s", "e.status = %s::escalation_status"]
+    params: list = [user["tenant_id"], status_filter]
+    if kind:
+        where.append("e.kind = %s::escalation_kind")
+        params.append(kind)
+
     rows = await fetch_all(
-        """SELECT e.id, e.reason, e.status::text AS status, e.contact_note,
+        f"""SELECT e.id, e.reason, e.kind::text AS kind, e.status::text AS status,
+                  e.contact_note, e.reference_code, e.contact_name, e.contact_phone,
+                  e.contact_email, e.preferred_channel, e.first_response_at,
                   e.created_at, e.assigned_to, e.conversation_id,
                   m.content AS bot_answer, t.confidence,
                   (SELECT content FROM messages um
@@ -355,11 +408,18 @@ async def list_escalations(
            FROM escalations e
            LEFT JOIN messages m       ON m.id = e.message_id
            LEFT JOIN message_traces t ON t.message_id = e.message_id
-           WHERE e.tenant_id = %s AND e.status = %s::escalation_status
-           ORDER BY e.created_at DESC LIMIT %s::int""",
-        (user["tenant_id"], status_filter, limit),
+           WHERE {' AND '.join(where)}
+           ORDER BY (e.kind = 'contact_request') DESC, e.created_at DESC
+           LIMIT %s::int""",
+        tuple(params + [limit]),
     )
-    return {"items": rows, "count": len(rows)}
+    counts = await fetch_one(
+        """SELECT count(*) FILTER (WHERE kind='contact_request' AND status='open') AS open_contact,
+                  count(*) FILTER (WHERE kind='content_gap'     AND status='open') AS open_gaps
+           FROM escalations WHERE tenant_id = %s""",
+        (user["tenant_id"],),
+    )
+    return {"items": rows, "count": len(rows), "counts": counts}
 
 
 @router.get("/escalations/{escalation_id}")
@@ -403,6 +463,9 @@ async def update_escalation(
     await execute(
         """UPDATE escalations
            SET status = %s::escalation_status, assigned_to = %s, resolution_note = %s,
+               -- first_response_at is set once and never moved: it measures how
+               -- long the person waited before anyone touched their request.
+               first_response_at = COALESCE(first_response_at, now()),
                resolved_at = CASE WHEN %s IN ('resolved','dismissed') THEN now() ELSE NULL END
            WHERE id = %s AND tenant_id = %s""",
         (new_status, user["id"], req.resolution_note, new_status, escalation_id, user["tenant_id"]),
@@ -426,14 +489,17 @@ async def promote_to_kb(
     if not esc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Escalation not found")
 
-    chash = ingest.content_hash(req.question, req.answer)
-    entry = await fetch_one(
-        """INSERT INTO kb_entries (tenant_id, question, answer, category, tags, citation,
-                                   status, source, external_id, content_hash, created_by)
-           VALUES (%s,%s,%s,%s,%s,%s,'draft','from_conversation',%s,%s,%s) RETURNING id""",
-        (user["tenant_id"], req.question, req.answer, req.category, req.tags,
-         req.citation, chash[:24], chash, user["id"]),
-    )
+    chash = await _reject_duplicate(user["tenant_id"], req.question, req.answer)
+    try:
+        entry = await fetch_one(
+            """INSERT INTO kb_entries (tenant_id, question, answer, category, tags, citation,
+                                       status, source, external_id, content_hash, created_by)
+               VALUES (%s,%s,%s,%s,%s,%s,'draft','from_conversation',%s,%s,%s) RETURNING id""",
+            (user["tenant_id"], req.question, req.answer, req.category, req.tags,
+             req.citation, chash[:24], chash, user["id"]),
+        )
+    except UniqueViolation:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Identical entry created concurrently")
     await execute(
         """UPDATE escalations SET resolved_entry_id=%s, status='resolved',
                                   assigned_to=%s, resolved_at=now()
@@ -609,3 +675,137 @@ async def deactivate_staff(staff_id: int, user: dict = Depends(require_roles()))
         tenant_id=user["tenant_id"], actor_id=user["id"], actor_label=user["email"],
     )
     return {"id": staff_id, "is_active": False}
+
+
+# --------------------------------------------------- attribution & oversight
+@router.get("/analytics/contributors")
+async def contributor_stats(user: dict = Depends(require_roles("manager"))) -> dict:
+    """Who wrote what: entries authored, published, rejected, edits made."""
+    rows = await fetch_all(
+        """SELECT * FROM v_contributor_stats
+           WHERE tenant_id = %s AND (entries_authored > 0 OR edits_made > 0)
+           ORDER BY entries_authored DESC""",
+        (user["tenant_id"],),
+    )
+    return {"items": rows}
+
+
+@router.get("/analytics/approvers")
+async def approver_stats(user: dict = Depends(require_roles("manager"))) -> dict:
+    """Who approved what, and how long they took to decide."""
+    rows = await fetch_all(
+        "SELECT * FROM v_approver_stats WHERE tenant_id = %s ORDER BY decisions DESC",
+        (user["tenant_id"],),
+    )
+    return {"items": rows}
+
+
+@router.get("/analytics/operators")
+async def operator_stats(user: dict = Depends(require_roles("manager"))) -> dict:
+    """Operator workload: requests handled, resolved, and turned into KB entries."""
+    rows = await fetch_all(
+        "SELECT * FROM v_operator_stats WHERE tenant_id = %s ORDER BY handled DESC",
+        (user["tenant_id"],),
+    )
+    return {"items": rows}
+
+
+@router.get("/analytics/activity")
+async def activity_feed(
+    user: dict = Depends(require_roles("manager")),
+    limit: int = Query(default=100, le=500),
+) -> dict:
+    """Chronological who-did-what, straight from the audit log."""
+    rows = await fetch_all(
+        "SELECT * FROM v_activity_feed WHERE tenant_id = %s LIMIT %s::int",
+        (user["tenant_id"], limit),
+    )
+    return {"items": rows}
+
+
+@router.get("/analytics/queue-health")
+async def queue_health(user: dict = Depends(require_roles("support", "manager"))) -> dict:
+    """Queue state split by kind. An open contact request is a person waiting;
+    an open content gap is only a missing article."""
+    rows = await fetch_all(
+        "SELECT * FROM v_queue_health WHERE tenant_id = %s", (user["tenant_id"],)
+    )
+    return {"items": rows}
+
+
+@router.get("/analytics/refusals")
+async def refusal_stats(
+    user: dict = Depends(require_roles("manager")),
+    days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=100, le=500),
+) -> dict:
+    """What the bot refused, and why.
+
+    Watch this for two things: abuse patterns, and genuine questions being
+    wrongly refused because the guard is too aggressive.
+    """
+    since = date.today() - timedelta(days=days)
+    summary = await fetch_all(
+        """SELECT category, sum(refusals) AS total FROM v_refusal_stats
+           WHERE tenant_id = %s AND day >= %s GROUP BY category ORDER BY total DESC""",
+        (user["tenant_id"], since),
+    )
+    recent = await fetch_all(
+        """SELECT id, question, category, confidence, created_at FROM refusals
+           WHERE tenant_id = %s AND created_at >= %s
+           ORDER BY created_at DESC LIMIT %s::int""",
+        (user["tenant_id"], since, limit),
+    )
+    return {"summary": summary, "recent": recent}
+
+
+# ------------------------------------------------------------------- tenants
+@router.get("/tenant")
+async def tenant_settings(user: dict = Depends(require_roles("manager"))) -> dict:
+    """Widget integration details, for handing to the host-app team."""
+    row = await fetch_one(
+        """SELECT id, slug, name, scope_desc, site_key, allowed_origins, is_active
+           FROM tenants WHERE id = %s""",
+        (user["tenant_id"],),
+    )
+    return row
+
+
+class TenantUpdate(BaseModel):
+    scope_desc: str | None = None
+    allowed_origins: list[str] | None = None
+
+
+@router.patch("/tenant")
+async def update_tenant(req: TenantUpdate, user: dict = Depends(require_roles())) -> dict:
+    current = await fetch_one(
+        "SELECT scope_desc, allowed_origins FROM tenants WHERE id = %s", (user["tenant_id"],)
+    )
+    scope = req.scope_desc if req.scope_desc is not None else current["scope_desc"]
+    origins = req.allowed_origins if req.allowed_origins is not None else current["allowed_origins"]
+    await execute(
+        "UPDATE tenants SET scope_desc = %s, allowed_origins = %s WHERE id = %s",
+        (scope, origins, user["tenant_id"]),
+    )
+    await audit.record(
+        action="tenant.update", entity_type="tenant", entity_id=user["tenant_id"],
+        tenant_id=user["tenant_id"], actor_id=user["id"], actor_label=user["email"],
+        before=dict(current), after={"scope_desc": scope, "allowed_origins": origins},
+    )
+    return {"ok": True}
+
+
+@router.post("/tenant/rotate-site-key")
+async def rotate_site_key(user: dict = Depends(require_roles())) -> dict:
+    """Issue a new site key. Every embedded widget stops working until the host
+    app is updated, so this is a break-glass action, not routine maintenance."""
+    row = await fetch_one(
+        """UPDATE tenants SET site_key = encode(gen_random_bytes(16), 'hex')
+           WHERE id = %s RETURNING site_key""",
+        (user["tenant_id"],),
+    )
+    await audit.record(
+        action="tenant.rotate_site_key", entity_type="tenant", entity_id=user["tenant_id"],
+        tenant_id=user["tenant_id"], actor_id=user["id"], actor_label=user["email"],
+    )
+    return {"site_key": row["site_key"]}

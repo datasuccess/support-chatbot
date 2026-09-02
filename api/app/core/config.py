@@ -44,9 +44,26 @@ class Settings(BaseSettings):
     widget_allowed_origins: str = "http://localhost:3000,http://localhost:8000"
     default_tenant: str = "mof-contracts"
 
+    # CIDRs whose X-Forwarded-For header may be trusted. Empty means the app is
+    # exposed directly and the header is ignored entirely. See core/net.py.
+    trusted_proxies: str = ""
+
+    # Account lockout, which per-IP rate limiting cannot provide: it does not
+    # stop a distributed brute force against a single account.
+    max_failed_logins: int = 5
+    lockout_minutes: int = 15
+
+    # Off-topic questions are refused outright. A question scoring below this is
+    # treated as out of scope and never becomes an operator task.
+    refusal_threshold: float = 0.05
+
     @property
     def allowed_origins(self) -> list[str]:
         return [o.strip() for o in self.widget_allowed_origins.split(",") if o.strip()]
+
+    @property
+    def trusted_proxies_list(self) -> list[str]:
+        return [p.strip() for p in self.trusted_proxies.split(",") if p.strip()]
 
 
 @lru_cache

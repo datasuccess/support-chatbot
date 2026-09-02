@@ -22,7 +22,7 @@ from openai import AsyncOpenAI
 
 from app.core.config import settings
 from app.core.db import connection
-from app.chat import prompts
+from app.chat import guard, prompts
 from app.retrieval.search import RetrievalResult, search
 
 log = logging.getLogger(__name__)
@@ -44,11 +44,24 @@ def client() -> AsyncOpenAI:
 
 @dataclass
 class AnswerContext:
-    conversation_id: str
-    user_message_id: int
+    """One of three outcomes, deliberately distinguished:
+
+      grounded  — answer from the knowledge base
+      escalated — in scope, but no good match. Offer a human; log a content gap.
+      refused   — out of scope. Flat refusal, no operator task, no callback.
+
+    Collapsing the last two (as an earlier version did) floods the operator queue
+    with political and off-topic questions nobody owes a reply to, and buries the
+    real requests underneath them.
+    """
     rewritten_query: str
     retrieval: RetrievalResult
-    escalate: bool
+    mode: str                              # grounded | escalated | refused
+    refusal_category: str | None = None
+
+    @property
+    def escalate(self) -> bool:
+        return self.mode != "grounded"
 
 
 def estimate_cost(prompt_tokens: int, completion_tokens: int) -> float:
@@ -85,12 +98,34 @@ async def rewrite_query(history: list[dict], question: str) -> str:
 
 
 async def prepare(tenant_id: int, history: list[dict], question: str) -> AnswerContext:
+    # Layer 1: pattern guard. Refuse before spending a rewrite, a retrieval pass
+    # or a token on anything the bot must never discuss.
+    category = guard.classify(question)
+    if category:
+        log.info("refused (%s): %r", category, question[:80])
+        return AnswerContext(
+            rewritten_query=question,
+            retrieval=RetrievalResult(candidates=[], top=[], confidence=0.0, elapsed_ms=0),
+            mode="refused",
+            refusal_category=category,
+        )
+
     rewritten = await rewrite_query(history, question)
     result = await search(tenant_id, rewritten)
-    escalate = result.confidence < settings.confidence_threshold or not result.top
+
+    # Layer 2: the retrieval gate. Two thresholds, not one — the distance between
+    # them is the band where the question looks like it belongs to this system but
+    # the knowledge base cannot answer it.
+    if not result.top or result.confidence < settings.refusal_threshold:
+        mode, refusal = "refused", "out_of_scope"
+    elif result.confidence < settings.confidence_threshold:
+        mode, refusal = "escalated", None
+    else:
+        mode, refusal = "grounded", None
+
     return AnswerContext(
-        conversation_id="", user_message_id=0,
-        rewritten_query=rewritten, retrieval=result, escalate=escalate,
+        rewritten_query=rewritten, retrieval=result,
+        mode=mode, refusal_category=refusal,
     )
 
 
@@ -104,14 +139,23 @@ async def stream_answer(
 
     Events: `token` (a chunk of answer text), `done` (JSON with usage + sources).
     """
-    if ctx.escalate:
-        text = prompts.LOW_CONFIDENCE_REPLY
-        # Emitted in chunks so the widget's streaming renderer behaves identically
-        # for escalations and real answers.
+    if ctx.mode != "grounded":
+        # Fixed text, never the model. There is no scenario where asking an LLM to
+        # phrase a refusal is safer than a reviewed constant.
+        text = (
+            prompts.OUT_OF_SCOPE_REPLY.format(tenant_name=tenant["name"])
+            if ctx.mode == "refused"
+            else prompts.LOW_CONFIDENCE_REPLY
+        )
+        # Chunked so the widget's streaming renderer behaves identically for
+        # refusals and real answers.
         for i in range(0, len(text), 24):
             yield "token", text[i : i + 24]
         yield "done", json.dumps({
-            "escalated": True, "confidence": round(ctx.retrieval.confidence, 4),
+            "escalated": True,
+            "mode": ctx.mode,
+            "refusal_category": ctx.refusal_category,
+            "confidence": round(ctx.retrieval.confidence, 4),
             "sources": [], "prompt_tokens": 0, "completion_tokens": 0,
         }, ensure_ascii=False)
         return
@@ -184,7 +228,7 @@ async def persist_trace(
             """,
             (
                 message_id,
-                "escalated" if ctx.escalate else "grounded",
+                ctx.mode,
                 ctx.retrieval.confidence,
                 ctx.escalate,
                 ctx.rewritten_query,

@@ -14,7 +14,7 @@ from app.admin.router import router as admin_router
 from app.chat.router import router as chat_router
 from app.core.config import settings
 from app.core.db import close_pool, fetch_one, open_pool
-from app.core.ratelimit import chat_limiter, client_key, login_limiter
+from app.core.ratelimit import chat_limiter, client_key, login_limiter, session_limiter
 from app.retrieval.models import warmup
 
 logging.basicConfig(
@@ -55,10 +55,24 @@ app.add_middleware(
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
     path = request.url.path
+    limiter = None
     if path == "/api/chat/stream":
-        chat_limiter.check(client_key(request))
+        limiter = chat_limiter
+    elif path == "/api/chat/session":
+        limiter = session_limiter
     elif path == "/api/admin/login":
-        login_limiter.check(client_key(request))
+        limiter = login_limiter
+
+    if limiter is not None:
+        retry_after = limiter.check(client_key(request))
+        if retry_after is not None:
+            # Returned, not raised: middleware sits outside the routing layer, so
+            # a raised HTTPException here would surface as a 500.
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Please slow down."},
+                headers={"Retry-After": str(retry_after)},
+            )
     return await call_next(request)
 
 
@@ -89,6 +103,19 @@ async def widget_page() -> FileResponse:
     the API keeps local development to a single process."""
     return FileResponse(
         pathlib.Path(__file__).resolve().parents[2] / "widget" / "index.html",
+        media_type="text/html",
+    )
+
+
+@app.get("/console", include_in_schema=False)
+async def console_page() -> FileResponse:
+    """Staff console — a single self-contained page, no build step.
+
+    Served from the API origin so the session cookie is same-origin and the
+    browser sends it without any CORS credential dance.
+    """
+    return FileResponse(
+        pathlib.Path(__file__).resolve().parents[2] / "console" / "index.html",
         media_type="text/html",
     )
 

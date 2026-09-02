@@ -230,3 +230,127 @@ lands perceived time-to-first-token near 2 seconds.
 almost always already ranked first by vector search. Real content is likely to need
 a wider pool. `RETRIEVAL_CANDIDATES` is configurable; re-measure at Phase 8 rather
 than assuming this default still holds.
+
+---
+
+## ADR-011 — Signed conversation tokens instead of client-supplied session ids
+
+**Status:** accepted · 2026-09-02
+
+**Context.** A pre-handover security probe found the widget's `session_id` was
+made up by the client and trusted by the server. Sending someone else's id
+appended messages to *their* conversation and pulled *their* history into the LLM
+context. `/rate` and `/csat` had the same shape: any `message_id` was accepted.
+
+**Decision.** The server mints an HMAC-signed token committing to a conversation
+id. Every endpoint derives its conversation from the token; ownership is never a
+caller-supplied parameter.
+
+**Why not a cookie.** The widget runs in a cross-origin iframe, where third-party
+cookie behaviour varies by browser and is actively being restricted. A bearer
+token in a header is explicit and works everywhere.
+
+**Scope.** This proves "you started this conversation" — the exact authority an
+anonymous support chat needs, and no more. It is not a login.
+
+---
+
+## ADR-012 — Site keys, because CORS is not a server-side control
+
+**Status:** accepted · 2026-09-02
+
+**Context.** `WIDGET_ALLOWED_ORIGINS` looked like access control. It is not: CORS
+is enforced by the *browser*. The probe confirmed a plain `curl` with
+`Origin: https://evil.example` returned 200.
+
+**Decision.** Per-tenant public site keys, validated server-side, plus an optional
+per-tenant origin allow-list checked against Origin/Referer.
+
+**Honest limits.** A site key ships in the page and is not a secret; headers can be
+forged. This identifies callers and enables per-tenant rate limiting — it does not
+authenticate them. Genuine abuse resistance is rate limiting plus the fact that the
+endpoint exposes nothing but public knowledge-base content.
+
+---
+
+## ADR-013 — Refusals are not escalations
+
+**Status:** accepted · 2026-09-02
+
+**Context.** Every low-confidence answer auto-created an operator task. A political
+question therefore generated work for a human who owed nobody a reply.
+
+**Decision.** Three outcomes, not two:
+
+| Outcome | Record | Operator task? |
+|---|---|---|
+| `grounded` | normal answer | no |
+| `escalated` | `escalations(kind='content_gap')` | no — content work |
+| `refused` | `refusals` | **never** |
+
+A real operator task is created only when a person fills in the contact form with
+their name and a way to reach them.
+
+**Reasoning.** A queue's value is inversely proportional to how much of it is
+noise. Burying three people waiting for a callback under two hundred off-topic
+questions makes the queue worthless, and the team stops looking at it.
+
+---
+
+## ADR-014 — Per-account lockout over aggressive per-IP login limits
+
+**Status:** accepted · 2026-09-02
+
+**Context.** The login limiter was 5 attempts per 5 minutes per IP. Ministry staff
+share office NAT gateways, so five typos from one floor would lock out everyone
+behind that address.
+
+**Decision.** Loosen the per-IP limit to 30/5min; add per-account lockout at 5
+failures for 15 minutes.
+
+**Reasoning.** These control different attacks. Per-IP blunts naive scripted
+attempts from one address. Per-account is the real brute-force defence and holds
+regardless of how many addresses an attacker has. Only the second justifies being
+tight, and only it fails safe for legitimate users — one account locks, not a
+building.
+
+**Found by:** running the security and end-to-end suites back to back. The second
+suite could not log in at all, which is exactly what a shared office gateway would
+have experienced on day one.
+
+---
+
+## ADR-015 — Duplicate knowledge-base content is a 409, not a 500
+
+**Status:** accepted · 2026-09-02
+
+**Context.** Creating an entry with content identical to an existing one raised a
+raw `UniqueViolation`, surfacing as an unexplained 500.
+
+**Decision.** Detect it and return 409 naming the existing entry. Applied to
+creation, promotion from a conversation, and editing.
+
+**Why not just allow duplicates.** Near-identical entries split the retrieval
+signal between them and make ranking worse as content grows. The constraint is
+worth keeping; only the error handling was wrong.
+
+---
+
+## ADR-016 — The staff console is one static HTML file
+
+**Status:** accepted · 2026-09-02
+
+**Context.** The console was the largest remaining gap. The obvious choice was
+Next.js, which the team already uses.
+
+**Decision.** A single self-contained HTML file served by the API at `/console`.
+No build step, no `node_modules`, no bundler.
+
+**Reasoning.** The API is the real contract, and it is fully tested. The console is
+forms and tables over it. A single file can be read, hosted or handed over by
+anyone without a toolchain, and being served from the API origin means the session
+cookie is same-origin — no CORS credential handling at all.
+
+**When to revisit.** If the console grows real client-side state — offline drafts,
+optimistic updates, complex routing — port it. Until then this is less to maintain,
+not a compromise.

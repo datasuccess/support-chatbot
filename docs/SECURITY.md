@@ -114,10 +114,43 @@ These are **not** built. Listed explicitly so nobody assumes otherwise.
 | No pen test | Unknown unknowns | Before public exposure |
 | No WCAG audit | Widget is built to AA but unverified | Before public exposure |
 | No secrets manager | `.env` on disk | Deployment phase |
-| No brute-force lockout | Rate limiting only, no account lockout | Before go-live |
+| ~~No brute-force lockout~~ | Fixed: per-account lockout, 5 failures / 15 min | ✅ done |
 | No CSRF tokens | `sameSite=lax` covers the common case, not all | Before go-live |
 | Rate limiting is per-process | Multiple workers multiply the ceiling | Before horizontal scaling |
 | No backup/restore procedure | Data loss risk | Deployment phase |
+
+## Pre-handover security probe (2026-09-02)
+
+Eight holes found and closed before the API went to the host-app team. Each is now
+an executable regression test in `scripts/security_test.py` — written as an attack
+that passes only when it fails.
+
+| Finding | Severity | Fix |
+|---|---|---|
+| `session_id` client-supplied — posting into another user's conversation leaked their history into the LLM context | **High** | HMAC-signed conversation tokens (ADR-011) |
+| `/rate` accepted any `message_id` | **High** | Ownership derived from the token |
+| `/csat` overwrote other sessions' ratings | **High** | Same |
+| CORS treated as access control — `curl` from any origin returned 200 | **High** | Server-side site keys + origin allow-list (ADR-012) |
+| Rate limiting keyed on `request.client.host` — collapses to one bucket behind nginx | **High in prod** | Trusted-proxy-aware `X-Forwarded-For` (`core/net.py`) |
+| `/escalate` unauthenticated — queue flooded in 3 requests | Medium | Token required; contact details validated |
+| Widget read its API origin from the query string | Medium | Origin derived from the script's own `src` |
+| Login limit per-IP only | Medium | Per-account lockout (ADR-014) |
+
+Two further bugs surfaced while fixing these:
+
+* **`HTTPException` raised in middleware never reaches FastAPI's exception
+  handlers.** Every rate-limited request returned **500 instead of 429**, so
+  clients never saw `Retry-After`. Middleware runs outside the routing layer; it
+  must *return* a response, not raise.
+* **Per-IP login limiting at 5/5min would lock out a whole office** behind one NAT
+  gateway. Found by running two test suites back to back — precisely what a shared
+  gateway experiences.
+
+Current status: **25 attacks blocked, 0 vulnerable.**
+
+```bash
+python -u scripts/security_test.py
+```
 
 ## Reporting
 

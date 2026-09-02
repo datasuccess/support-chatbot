@@ -1,0 +1,715 @@
+<!doctype html>
+<html lang="az">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dəstək konsolu</title>
+<style>
+  /* Single self-contained page, no build step. The whole console is one HTML
+     file so the ministry's team can host or inspect it without a Node toolchain.
+     Port to a framework later if it outgrows this — the API is the contract. */
+  :root {
+    --bg:#f4f6f8; --panel:#fff; --ink:#1a1d21; --soft:#5b6470; --brand:#1c5d99;
+    --border:#dde2e8; --ok:#1a7f52; --warn:#9a5b00; --bad:#b3261e;
+    --radius:10px;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--font);background:var(--bg);color:var(--ink);font-size:14px;line-height:1.5}
+  a{color:var(--brand)}
+  button{font-family:var(--font);font-size:13px;cursor:pointer;border:1px solid var(--border);
+    background:#fff;color:var(--ink);border-radius:8px;padding:6px 11px}
+  button:hover{background:#f0f3f6}
+  button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{
+    outline:3px solid #7aa7d1;outline-offset:1px}
+  button.primary{background:var(--brand);color:#fff;border-color:var(--brand);font-weight:600}
+  button.primary:hover{background:#17507f}
+  button.danger{color:var(--bad);border-color:#e6b4b0}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  input,textarea,select{font-family:var(--font);font-size:14px;color:var(--ink);
+    border:1px solid var(--border);border-radius:8px;padding:8px 10px;width:100%;background:#fff}
+  textarea{resize:vertical;min-height:90px}
+
+  header.top{background:var(--brand);color:#fff;padding:11px 20px;display:flex;align-items:center;gap:14px}
+  header.top .brand{font-weight:650}
+  header.top .who{margin-inline-start:auto;font-size:13px;opacity:.92}
+  nav.tabs{background:var(--panel);border-bottom:1px solid var(--border);padding:0 20px;display:flex;gap:2px;overflow-x:auto}
+  nav.tabs button{border:none;background:transparent;border-radius:0;border-bottom:2px solid transparent;
+    padding:11px 13px;color:var(--soft);white-space:nowrap}
+  nav.tabs button[aria-current="page"]{color:var(--brand);border-bottom-color:var(--brand);font-weight:600}
+  main{padding:20px;max-width:1180px;margin:0 auto}
+
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:14px}
+  .card h2{margin:0 0 12px;font-size:15px;font-weight:650}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .grid{display:grid;gap:12px}
+  .grid.k4{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+  .stat{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:13px}
+  .stat .n{font-size:25px;font-weight:650;line-height:1.15}
+  .stat .l{font-size:12px;color:var(--soft);margin-top:2px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:start;padding:8px 9px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--soft);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  .scroll{overflow-x:auto}
+  .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--border);white-space:nowrap}
+  .pill.published{background:#e6f2ea;color:var(--ok);border-color:#a8d5be}
+  .pill.draft{background:#f0f3f6;color:var(--soft)}
+  .pill.pending_approval{background:#fff4e0;color:var(--warn);border-color:#f0d9a0}
+  .pill.rejected,.pill.archived{background:#fdecea;color:var(--bad);border-color:#e6b4b0}
+  .pill.contact_request{background:#fdecea;color:var(--bad);border-color:#e6b4b0;font-weight:600}
+  .pill.content_gap{background:#f0f3f6;color:var(--soft)}
+  .muted{color:var(--soft)}
+  .empty{color:var(--soft);padding:22px;text-align:center}
+  .bar{height:7px;background:#eef1f4;border-radius:4px;overflow:hidden}
+  .bar > i{display:block;height:100%;background:var(--brand)}
+  dialog{border:none;border-radius:12px;padding:0;max-width:760px;width:94%;
+    box-shadow:0 18px 50px rgba(0,0,0,.26)}
+  dialog::backdrop{background:rgba(15,20,28,.45)}
+  .modal-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center}
+  .modal-head h3{margin:0;font-size:15px}
+  .modal-head button{margin-inline-start:auto}
+  .modal-body{padding:18px;max-height:70vh;overflow-y:auto}
+  .modal-foot{padding:13px 18px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:12px;color:var(--soft);margin-bottom:4px;font-weight:600}
+  .transcript{background:#f8fafb;border:1px solid var(--border);border-radius:8px;padding:11px;margin-bottom:12px}
+  .turn{margin-bottom:9px}
+  .turn .role{font-size:11px;color:var(--soft);text-transform:uppercase;letter-spacing:.04em}
+  .turn .text{white-space:pre-wrap}
+  .login-wrap{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+  .login{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:26px;width:100%;max-width:370px}
+  .login h1{margin:0 0 4px;font-size:18px}
+  .login p{margin:0 0 18px;color:var(--soft);font-size:13px}
+  .err{color:var(--bad);font-size:13px;margin-top:9px}
+  .hint{font-size:12px;color:var(--soft);margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}
+  code{background:#eef2f6;padding:1px 5px;border-radius:4px;font-size:12px}
+  .visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+</style>
+</head>
+<body>
+
+<div id="loginView" class="login-wrap">
+  <form class="login" id="loginForm">
+    <h1>🏛️ Dəstək konsolu</h1>
+    <p>Dövlət Satınalmaları Portalı</p>
+    <div class="field">
+      <label for="email">E-poçt</label>
+      <input id="email" type="email" autocomplete="username" required>
+    </div>
+    <div class="field">
+      <label for="password">Şifrə</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+    </div>
+    <button class="primary" type="submit" style="width:100%">Daxil ol</button>
+    <div class="err" id="loginErr" role="alert" style="display:none"></div>
+    <div class="hint">Test hesabları: <code>support@mof.local</code>,
+      <code>manager@mof.local</code>, <code>admin@mof.local</code> — şifrə <code>dev12345</code></div>
+  </form>
+</div>
+
+<div id="appView" style="display:none">
+  <header class="top">
+    <span aria-hidden="true">🏛️</span>
+    <span class="brand">Dəstək konsolu</span>
+    <span class="who" id="who"></span>
+    <button id="logout" style="background:transparent;color:#fff;border-color:rgba(255,255,255,.45)">Çıxış</button>
+  </header>
+  <nav class="tabs" id="tabs" aria-label="Bölmələr"></nav>
+  <main id="view" tabindex="-1"></main>
+</div>
+
+<dialog id="modal">
+  <div class="modal-head"><h3 id="modalTitle"></h3>
+    <button id="modalClose" aria-label="Bağla">✕</button></div>
+  <div class="modal-body" id="modalBody"></div>
+  <div class="modal-foot" id="modalFoot"></div>
+</dialog>
+
+<script>
+(function () {
+  "use strict";
+  const API = location.origin;
+  let me = null;
+  let tab = null;
+
+  /* ------------------------------------------------------------- utilities */
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
+    c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+
+  function dt(v) {
+    if (!v) return "—";
+    const d = new Date(v);
+    return d.toLocaleString("az-AZ", { day:"2-digit", month:"2-digit", year:"numeric",
+                                       hour:"2-digit", minute:"2-digit" });
+  }
+  function ago(v) {
+    if (!v) return "—";
+    const mins = Math.floor((Date.now() - new Date(v)) / 60000);
+    if (mins < 60) return mins + " dəq";
+    if (mins < 1440) return Math.floor(mins / 60) + " saat";
+    return Math.floor(mins / 1440) + " gün";
+  }
+
+  async function req(path, opts) {
+    const r = await fetch(API + path, Object.assign({
+      headers: { "Content-Type": "application/json" }, credentials: "same-origin"
+    }, opts || {}));
+    if (r.status === 401) { showLogin(); throw new Error("unauthenticated"); }
+    if (!r.ok) {
+      let msg = "HTTP " + r.status;
+      try { msg = (await r.json()).detail || msg; } catch (e) {}
+      throw new Error(msg);
+    }
+    return r.status === 204 ? null : r.json();
+  }
+  const get  = (p) => req(p);
+  const post = (p, b) => req(p, { method:"POST", body: JSON.stringify(b || {}) });
+  const patch= (p, b) => req(p, { method:"PATCH", body: JSON.stringify(b || {}) });
+
+  function modal(title, bodyHtml, buttons) {
+    $("modalTitle").textContent = title;
+    $("modalBody").innerHTML = bodyHtml;
+    const foot = $("modalFoot");
+    foot.innerHTML = "";
+    (buttons || []).forEach(b => {
+      const el = document.createElement("button");
+      el.textContent = b.label;
+      if (b.cls) el.className = b.cls;
+      el.onclick = b.onClick;
+      foot.appendChild(el);
+    });
+    $("modal").showModal();
+  }
+  $("modalClose").onclick = () => $("modal").close();
+
+  function toast(msg, bad) {
+    const el = document.createElement("div");
+    el.textContent = msg;
+    el.style.cssText = "position:fixed;inset-block-end:20px;inset-inline-start:50%;" +
+      "transform:translateX(-50%);background:" + (bad ? "#b3261e" : "#1a7f52") +
+      ";color:#fff;padding:10px 18px;border-radius:9px;z-index:9999;font-size:14px;" +
+      "box-shadow:0 4px 14px rgba(0,0,0,.24)";
+    el.setAttribute("role", "status");
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 2600);
+  }
+
+  function table(cols, rows, render) {
+    if (!rows.length) return '<div class="empty">Məlumat yoxdur</div>';
+    return '<div class="scroll"><table><thead><tr>' +
+      cols.map(c => "<th>" + esc(c) + "</th>").join("") +
+      "</tr></thead><tbody>" + rows.map(render).join("") + "</tbody></table></div>";
+  }
+
+  /* ------------------------------------------------------------------ auth */
+  function showLogin() {
+    $("appView").style.display = "none";
+    $("loginView").style.display = "flex";
+    me = null;
+  }
+
+  $("loginForm").onsubmit = async (e) => {
+    e.preventDefault();
+    $("loginErr").style.display = "none";
+    try {
+      me = await post("/api/admin/login",
+        { email: $("email").value.trim(), password: $("password").value });
+      start();
+    } catch (err) {
+      $("loginErr").textContent = "Giriş alınmadı. Məlumatları yoxlayın.";
+      $("loginErr").style.display = "";
+    }
+  };
+
+  $("logout").onclick = async () => {
+    try { await post("/api/admin/logout"); } catch (e) {}
+    showLogin();
+  };
+
+  /* ------------------------------------------------------------------ tabs */
+  const TABS = [
+    { id:"queue",     label:"📥 Növbə",      roles:["support","manager","admin"] },
+    { id:"kb",        label:"📚 Bilik bazası", roles:["support","manager","admin"] },
+    { id:"approvals", label:"✅ Təsdiq",     roles:["manager","admin"] },
+    { id:"analytics", label:"📊 Analitika",  roles:["manager","admin"] },
+    { id:"activity",  label:"🕓 Fəaliyyət",  roles:["manager","admin"] },
+    { id:"staff",     label:"👥 İstifadəçilər", roles:["admin"] },
+    { id:"settings",  label:"⚙️ Parametrlər", roles:["manager","admin"] },
+  ];
+
+  function start() {
+    $("loginView").style.display = "none";
+    $("appView").style.display = "";
+    $("who").textContent = me.full_name + " · " + me.role;
+    const allowed = TABS.filter(t => t.roles.includes(me.role));
+    $("tabs").innerHTML = "";
+    allowed.forEach(t => {
+      const b = document.createElement("button");
+      b.textContent = t.label;
+      b.onclick = () => go(t.id);
+      b.dataset.tab = t.id;
+      $("tabs").appendChild(b);
+    });
+    go(allowed[0].id);
+  }
+
+  function go(id) {
+    tab = id;
+    Array.from($("tabs").children).forEach(b =>
+      b.setAttribute("aria-current", b.dataset.tab === id ? "page" : "false"));
+    $("view").innerHTML = '<div class="empty">Yüklənir…</div>';
+    ({ queue:renderQueue, kb:renderKb, approvals:renderApprovals,
+       analytics:renderAnalytics, activity:renderActivity,
+       staff:renderStaff, settings:renderSettings })[id]();
+  }
+  const refresh = () => go(tab);
+
+  /* ----------------------------------------------------------------- queue */
+  async function renderQueue() {
+    const [contact, gaps, health] = await Promise.all([
+      get("/api/admin/escalations?status=open&kind=contact_request"),
+      get("/api/admin/escalations?status=open&kind=content_gap"),
+      get("/api/admin/analytics/queue-health"),
+    ]);
+    const c = contact.counts || {};
+    const overdue = (health.items || [])
+      .filter(h => h.kind === "contact_request")
+      .reduce((a, h) => a + (h.open_over_24h || 0), 0);
+
+    $("view").innerHTML =
+      '<div class="grid k4" style="margin-bottom:14px">' +
+        stat(c.open_contact || 0, "Açıq əlaqə sorğusu", (c.open_contact ? "var(--bad)" : null)) +
+        stat(c.open_gaps || 0, "Bilik boşluğu") +
+        stat(overdue, "24 saatdan çox gözləyən", (overdue ? "var(--warn)" : null)) +
+      "</div>" +
+
+      '<div class="card"><h2>💬 Əlaqə sorğuları — insan gözləyir</h2>' +
+      '<p class="muted" style="margin-top:-6px">İstifadəçi operatorla danışmaq istəyib. ' +
+      "Hər biri geri zəng gözləyən real şəxsdir.</p>" +
+      table(["Kod","Ad","Əlaqə","Sual","Gözləyir",""], contact.items, r =>
+        "<tr>" +
+        "<td><strong>" + esc(r.reference_code || "—") + "</strong></td>" +
+        "<td>" + esc(r.contact_name || "—") + "</td>" +
+        "<td>" + esc(r.preferred_channel === "email" ? (r.contact_email || "—")
+                                                     : (r.contact_phone || "—")) + "</td>" +
+        '<td style="max-width:290px">' + esc((r.user_question || "").slice(0, 110)) + "</td>" +
+        "<td>" + ago(r.created_at) + "</td>" +
+        '<td><button onclick="__open(' + r.id + ')">Aç</button></td>' +
+        "</tr>") +
+      "</div>" +
+
+      '<div class="card"><h2>📭 Bilik boşluqları — cavab tapılmadı</h2>' +
+      '<p class="muted" style="margin-top:-6px">Bot cavab verə bilmədi. Heç kim zəng gözləmir — ' +
+      "bunlar bilik bazasına əlavə ediləcək məzmundur.</p>" +
+      table(["Sual","Etibar","Səbəb","Vaxt",""], gaps.items, r =>
+        "<tr>" +
+        '<td style="max-width:380px">' + esc((r.user_question || "").slice(0, 140)) + "</td>" +
+        "<td>" + (r.confidence == null ? "—" : Number(r.confidence).toFixed(3)) + "</td>" +
+        '<td><span class="pill">' + esc(r.reason) + "</span></td>" +
+        "<td>" + ago(r.created_at) + "</td>" +
+        '<td><button onclick="__open(' + r.id + ')">Aç</button></td>' +
+        "</tr>") +
+      "</div>";
+  }
+
+  function stat(n, label, color) {
+    return '<div class="stat"><div class="n"' + (color ? ' style="color:' + color + '"' : "") +
+           ">" + esc(n) + '</div><div class="l">' + esc(label) + "</div></div>";
+  }
+
+  window.__open = async (id) => {
+    const e = await get("/api/admin/escalations/" + id);
+    const transcript = (e.transcript || []).map(t =>
+      '<div class="turn"><div class="role">' +
+      (t.role === "user" ? "İstifadəçi" : "Bot") + "</div>" +
+      '<div class="text">' + esc(t.content) + "</div></div>").join("");
+
+    /* Retrieval diagnostics distinguish the two failure modes that look identical
+       from outside: the entry did not exist (content gap) versus it existed but
+       ranked poorly (retrieval gap). They need opposite fixes. */
+    const retrieved = (e.retrieved || []).map(r =>
+      "<tr><td>" + r.rank + "</td><td>" +
+      (r.rerank_score == null ? "—" : Number(r.rerank_score).toFixed(4)) + "</td><td>" +
+      (r.used ? "✅" : "") + "</td><td>" + esc(r.question || "—") + "</td></tr>").join("");
+
+    const isContact = e.kind === "contact_request";
+    const contactBlock = isContact ?
+      '<div class="card" style="margin-bottom:12px"><h2>Əlaqə məlumatları</h2>' +
+      "<p><strong>" + esc(e.contact_name || "—") + "</strong><br>" +
+      esc(e.preferred_channel === "email" ? (e.contact_email || "") : (e.contact_phone || "")) +
+      "<br><span class='muted'>Kod: " + esc(e.reference_code || "—") + "</span></p>" +
+      (e.contact_note ? "<p>" + esc(e.contact_note) + "</p>" : "") + "</div>" : "";
+
+    modal(isContact ? "💬 Əlaqə sorğusu" : "📭 Bilik boşluğu",
+      contactBlock +
+      "<h4 style='margin:0 0 6px'>Söhbət</h4><div class='transcript'>" +
+        (transcript || "<span class='muted'>Yoxdur</span>") + "</div>" +
+      "<h4 style='margin:0 0 6px'>Axtarış nəticələri</h4>" +
+      (retrieved ? "<div class='scroll'><table><thead><tr><th>#</th><th>Bal</th>" +
+        "<th>İstifadə</th><th>Bilik bazası sualı</th></tr></thead><tbody>" +
+        retrieved + "</tbody></table></div>" :
+        "<p class='muted'>Heç bir nəticə tapılmadı — bu mövzu bilik bazasında yoxdur.</p>"),
+      [
+        { label:"Bilik bazasına əlavə et", cls:"primary",
+          onClick: () => { $("modal").close(); promote(e); } },
+        { label:"İşlənir", onClick: () => setStatus(id, "in_progress") },
+        { label:"Həll edildi", onClick: () => setStatus(id, "resolved") },
+        { label:"Ləğv et", cls:"danger", onClick: () => setStatus(id, "dismissed") },
+      ]);
+  };
+
+  async function setStatus(id, status) {
+    try {
+      await patch("/api/admin/escalations/" + id + "?status=" + status, {});
+      $("modal").close(); toast("Status yeniləndi"); refresh();
+    } catch (e) { toast(e.message, true); }
+  }
+
+  function promote(e) {
+    const q = (e.transcript || []).filter(t => t.role === "user").pop();
+    modal("Söhbətdən bilik bazası yazısı",
+      '<div class="field"><label for="pq">Sual</label>' +
+      '<input id="pq" value="' + esc(q ? q.content : "") + '"></div>' +
+      '<div class="field"><label for="pa">Cavab</label><textarea id="pa"></textarea></div>' +
+      '<div class="field"><label for="pc">Kateqoriya</label><input id="pc"></div>' +
+      '<div class="field"><label for="pcite">Mənbə</label><input id="pcite"></div>' +
+      '<p class="muted">Yazı <strong>qaralama</strong> kimi yaradılır və menecer ' +
+      "təsdiqləyənə qədər istifadəçilərə göstərilmir.</p>",
+      [{ label:"Yarat", cls:"primary", onClick: async () => {
+          try {
+            await post("/api/admin/escalations/" + e.id + "/promote", {
+              question: $("pq").value.trim(), answer: $("pa").value.trim(),
+              category: $("pc").value.trim() || null,
+              citation: $("pcite").value.trim() || null });
+            $("modal").close(); toast("Qaralama yaradıldı"); refresh();
+          } catch (err) { toast(err.message, true); }
+        } }]);
+  }
+
+  /* -------------------------------------------------------------------- kb */
+  let kbFilter = "";
+  async function renderKb() {
+    const d = await get("/api/admin/kb?limit=200" + (kbFilter ? "&status=" + kbFilter : ""));
+    const canEdit = me.role === "support" || me.role === "admin";
+    $("view").innerHTML =
+      '<div class="card"><div class="row" style="margin-bottom:12px">' +
+        "<h2 style='margin:0'>📚 Bilik bazası (" + d.total + ")</h2>" +
+        '<select id="kbStatus" style="width:auto;margin-inline-start:auto">' +
+          ["", "draft", "pending_approval", "published", "rejected", "archived"].map(s =>
+            '<option value="' + s + '"' + (s === kbFilter ? " selected" : "") + ">" +
+            (s || "Hamısı") + "</option>").join("") +
+        "</select>" +
+        (canEdit ? '<button class="primary" id="kbNew">+ Yeni yazı</button>' : "") +
+      "</div>" +
+      table(["Sual","Kateqoriya","Status","Mənbə","V","Yenilənib",""], d.items, r =>
+        "<tr>" +
+        '<td style="max-width:400px">' + esc(r.question) + "</td>" +
+        "<td>" + esc(r.category || "—") + "</td>" +
+        '<td><span class="pill ' + esc(r.status) + '">' + esc(r.status) + "</span></td>" +
+        "<td>" + (r.source === "synthetic" ?
+          '<span class="pill" style="background:#fff4e0;color:#9a5b00;border-color:#f0d9a0">süni</span>'
+          : esc(r.source)) + "</td>" +
+        "<td>" + r.version + "</td>" +
+        "<td>" + dt(r.updated_at) + "</td>" +
+        '<td><button onclick="__kb(' + r.id + ')">Aç</button></td>' +
+        "</tr>") + "</div>";
+
+    $("kbStatus").onchange = (e) => { kbFilter = e.target.value; renderKb(); };
+    if (canEdit) $("kbNew").onclick = () => editEntry(null);
+  }
+
+  window.__kb = async (id) => editEntry(await get("/api/admin/kb/" + id));
+
+  function editEntry(entry) {
+    const canEdit = me.role === "support" || me.role === "admin";
+    const isNew = !entry;
+    const versions = entry && entry.versions && entry.versions.length ?
+      "<h4 style='margin:14px 0 6px'>Versiya tarixçəsi</h4>" +
+      "<div class='scroll'><table><thead><tr><th>V</th><th>Status</th><th>Qeyd</th>" +
+      "<th>Tarix</th></tr></thead><tbody>" + entry.versions.map(v =>
+        "<tr><td>" + v.version + "</td><td>" + esc(v.status) + "</td><td>" +
+        esc(v.change_note || "—") + "</td><td>" + dt(v.created_at) +
+        "</td></tr>").join("") + "</tbody></table></div>" : "";
+
+    modal(isNew ? "Yeni yazı" : "Yazı #" + entry.id +
+          (entry ? "  ·  v" + entry.version + "  ·  " + entry.status : ""),
+      '<div class="field"><label for="eq">Sual</label>' +
+        '<input id="eq" ' + (canEdit ? "" : "disabled") + ' value="' +
+        esc(entry ? entry.question : "") + '"></div>' +
+      '<div class="field"><label for="ea">Cavab</label>' +
+        '<textarea id="ea" ' + (canEdit ? "" : "disabled") + ">" +
+        esc(entry ? entry.answer : "") + "</textarea></div>" +
+      '<div class="row"><div class="field" style="flex:1"><label for="ec">Kateqoriya</label>' +
+        '<input id="ec" ' + (canEdit ? "" : "disabled") + ' value="' +
+        esc(entry ? (entry.category || "") : "") + '"></div>' +
+      '<div class="field" style="flex:1"><label for="ecite">Mənbə</label>' +
+        '<input id="ecite" ' + (canEdit ? "" : "disabled") + ' value="' +
+        esc(entry ? (entry.citation || "") : "") + '"></div></div>' +
+      (canEdit && entry ? '<div class="field"><label for="enote">Dəyişiklik qeydi</label>' +
+        '<input id="enote" placeholder="Nə dəyişdi və niyə?"></div>' : "") +
+      versions,
+      buildEntryButtons(entry, isNew, canEdit));
+  }
+
+  function buildEntryButtons(entry, isNew, canEdit) {
+    const btns = [];
+    const body = () => ({
+      question: $("eq").value.trim(), answer: $("ea").value.trim(),
+      category: $("ec").value.trim() || null, citation: $("ecite").value.trim() || null,
+    });
+    if (canEdit) {
+      btns.push({ label: isNew ? "Yarat" : "Yadda saxla", cls:"primary", onClick: async () => {
+        try {
+          if (isNew) await post("/api/admin/kb", body());
+          else {
+            const b = body();
+            b.change_note = ($("enote") || {}).value || null;
+            await patch("/api/admin/kb/" + entry.id, b);
+          }
+          $("modal").close(); toast("Yadda saxlanıldı"); refresh();
+        } catch (e) { toast(e.message, true); }
+      }});
+    }
+    if (entry && canEdit && ["draft","rejected"].includes(entry.status)) {
+      btns.push({ label:"Təsdiqə göndər", onClick: async () => {
+        try { await post("/api/admin/kb/" + entry.id + "/submit");
+              $("modal").close(); toast("Təsdiqə göndərildi"); refresh(); }
+        catch (e) { toast(e.message, true); }
+      }});
+    }
+    if (entry && ["manager","admin"].includes(me.role) && entry.status !== "archived") {
+      btns.push({ label:"Arxivləşdir", cls:"danger", onClick: async () => {
+        try { await post("/api/admin/kb/" + entry.id + "/archive");
+              $("modal").close(); toast("Arxivləşdirildi"); refresh(); }
+        catch (e) { toast(e.message, true); }
+      }});
+    }
+    return btns;
+  }
+
+  /* ------------------------------------------------------------- approvals */
+  async function renderApprovals() {
+    const d = await get("/api/admin/kb?status=pending_approval&limit=200");
+    $("view").innerHTML =
+      '<div class="card"><h2>✅ Təsdiq gözləyən yazılar (' + d.total + ")</h2>" +
+      '<p class="muted" style="margin-top:-6px">Dörd göz prinsipi: yazının müəllifi ' +
+      "onu özü təsdiqləyə bilməz.</p>" +
+      table(["Sual","Kateqoriya","V","Yaradılıb",""], d.items, r =>
+        "<tr>" +
+        '<td style="max-width:430px">' + esc(r.question) + "</td>" +
+        "<td>" + esc(r.category || "—") + "</td><td>" + r.version + "</td>" +
+        "<td>" + dt(r.created_at) + "</td>" +
+        '<td><button class="primary" onclick="__review(' + r.id + ')">Bax</button></td>' +
+        "</tr>") + "</div>";
+  }
+
+  window.__review = async (id) => {
+    const e = await get("/api/admin/kb/" + id);
+    modal("Təsdiq — yazı #" + e.id,
+      "<h4 style='margin:0 0 4px'>Sual</h4><p>" + esc(e.question) + "</p>" +
+      "<h4 style='margin:14px 0 4px'>Cavab</h4>" +
+      "<div class='transcript'><div class='text'>" + esc(e.answer) + "</div></div>" +
+      "<p class='muted'>Kateqoriya: " + esc(e.category || "—") +
+      " · Mənbə: " + esc(e.citation || "—") + "</p>" +
+      '<div class="field"><label for="dnote">Qərar qeydi</label><input id="dnote"></div>',
+      [
+        { label:"Təsdiqlə və dərc et", cls:"primary", onClick: async () => {
+          try { await post("/api/admin/kb/" + id + "/approve", { note: $("dnote").value || null });
+                $("modal").close(); toast("Dərc edildi"); refresh(); }
+          catch (err) { toast(err.message, true); }
+        }},
+        { label:"Rədd et", cls:"danger", onClick: async () => {
+          try { await post("/api/admin/kb/" + id + "/reject", { note: $("dnote").value || null });
+                $("modal").close(); toast("Rədd edildi"); refresh(); }
+          catch (err) { toast(err.message, true); }
+        }},
+      ]);
+  };
+
+  /* ------------------------------------------------------------- analytics */
+  async function renderAnalytics() {
+    const [ov, contrib, appr, ops, refus] = await Promise.all([
+      get("/api/admin/analytics/overview?days=30"),
+      get("/api/admin/analytics/contributors"),
+      get("/api/admin/analytics/approvers"),
+      get("/api/admin/analytics/operators"),
+      get("/api/admin/analytics/refusals?days=30"),
+    ]);
+    const t = ov.totals || {}, kb = ov.kb_health || {};
+    const defl = (ov.deflection || []).reduce((a, d) =>
+      ({ answers: a.answers + Number(d.answers || 0),
+         self: a.self + Number(d.self_served || 0) }), { answers:0, self:0 });
+    const deflPct = defl.answers ? Math.round(100 * defl.self / defl.answers) : 0;
+    const cost = (ov.cost || []).reduce((a, c) => a + Number(c.cost_usd || 0), 0);
+
+    $("view").innerHTML =
+      '<div class="grid k4" style="margin-bottom:14px">' +
+        stat(t.conversations || 0, "Söhbət (30 gün)") +
+        stat(deflPct + "%", "Bota həll olunub") +
+        stat(t.open_escalations || 0, "Açıq növbə") +
+        stat(t.avg_csat || "—", "Orta məmnunluq (1-5)") +
+      "</div>" +
+
+      '<div class="card"><h2>📚 Bilik bazası vəziyyəti</h2><div class="grid k4">' +
+        stat(kb.total || 0, "Ümumi") + stat(kb.published || 0, "Dərc edilib") +
+        stat(kb.pending_approval || 0, "Təsdiq gözləyir") +
+        stat(kb.synthetic || 0, "Süni (silinməlidir)",
+             (kb.synthetic ? "var(--warn)" : null)) +
+      "</div>" +
+      (kb.synthetic ? '<p class="muted" style="margin-bottom:0">⚠️ Süni məzmun yalnız ' +
+        "sınaq üçündür və real istifadəyə verilməzdən əvvəl əvəz olunmalıdır.</p>" : "") +
+      "</div>" +
+
+      '<div class="card"><h2>✍️ Kim nə yazıb</h2>' +
+      table(["Əməkdaş","Rol","Yazılıb","Dərc","Gözləyir","Rədd","Söhbətdən","Redaktə"],
+        contrib.items, r => "<tr><td>" + esc(r.full_name) + "</td>" +
+        '<td><span class="pill">' + esc(r.role) + "</span></td><td>" +
+        r.entries_authored + "</td><td>" + r.entries_published + "</td><td>" +
+        r.entries_awaiting_approval + "</td><td>" + r.entries_rejected + "</td><td>" +
+        r.entries_from_conversations + "</td><td>" + r.edits_made + "</td></tr>") +
+      "</div>" +
+
+      '<div class="card"><h2>✅ Kim təsdiqləyib</h2>' +
+      table(["Menecer","Qərar","Təsdiq","Rədd","Orta müddət (saat)"], appr.items, r =>
+        "<tr><td>" + esc(r.full_name) + "</td><td>" + r.decisions + "</td><td>" +
+        r.approved + "</td><td>" + r.rejected + "</td><td>" +
+        (r.avg_hours_to_decide == null ? "—" : r.avg_hours_to_decide) + "</td></tr>") +
+      "</div>" +
+
+      '<div class="card"><h2>🎧 Operator yükü</h2>' +
+      table(["Operator","İşlənib","Əlaqə","Boşluq","Həll","Bazaya çevrilib","Orta saat"],
+        ops.items, r => "<tr><td>" + esc(r.full_name) + "</td><td>" + r.handled +
+        "</td><td>" + r.contact_requests + "</td><td>" + r.content_gaps + "</td><td>" +
+        r.resolved + "</td><td>" + r.turned_into_kb_entries + "</td><td>" +
+        (r.avg_hours_to_resolve == null ? "—" : r.avg_hours_to_resolve) + "</td></tr>") +
+      "</div>" +
+
+      '<div class="card"><h2>🚫 Rədd edilən suallar</h2>' +
+      '<p class="muted" style="margin-top:-6px">Sui-istifadə nümunələrini və səhvən ' +
+      "rədd edilən real sualları burada izləyin.</p>" +
+      table(["Kateqoriya","Say"], refus.summary, r =>
+        '<tr><td><span class="pill">' + esc(r.category) + "</span></td><td>" +
+        r.total + "</td></tr>") +
+      (refus.recent && refus.recent.length ?
+        "<h4 style='margin:14px 0 6px'>Son rədd edilənlər</h4>" +
+        table(["Sual","Kateqoriya","Vaxt"], refus.recent.slice(0, 15), r =>
+          '<tr><td style="max-width:430px">' + esc(r.question) + "</td><td>" +
+          esc(r.category) + "</td><td>" + dt(r.created_at) + "</td></tr>") : "") +
+      "</div>" +
+
+      '<div class="card"><h2>💵 Xərc (30 gün)</h2>' +
+      "<p style='font-size:22px;font-weight:650;margin:0'>$" + cost.toFixed(4) + "</p>" +
+      '<p class="muted">Embedding və reranking lokal işləyir — yalnız cavab ' +
+      "generasiyası xərc yaradır.</p></div>";
+  }
+
+  /* -------------------------------------------------------------- activity */
+  async function renderActivity() {
+    const d = await get("/api/admin/analytics/activity?limit=200");
+    const chain = await get("/api/admin/audit/verify");
+    $("view").innerHTML =
+      '<div class="card"><h2>🔐 Audit zənciri</h2>' +
+      "<p>" + (chain.valid ?
+        '<span class="pill published">✅ Bütöv</span> ' + chain.checked +
+        " qeyd yoxlanıldı — heç bir dəyişiklik aşkarlanmadı." :
+        '<span class="pill rejected">⚠️ POZULUB</span> qeyd #' + chain.broken_at_id) +
+      "</p></div>" +
+      '<div class="card"><h2>🕓 Kim nə edib</h2>' +
+      table(["Vaxt","Əməkdaş","Rol","Əməliyyat","Obyekt"], d.items, r =>
+        "<tr><td>" + dt(r.created_at) + "</td><td>" +
+        esc(r.full_name || r.actor_label) + "</td>" +
+        '<td><span class="pill">' + esc(r.role || "—") + "</span></td>" +
+        '<td><code>' + esc(r.action) + "</code></td><td>" +
+        esc(r.entity_type) + (r.entity_id ? " #" + esc(r.entity_id) : "") +
+        "</td></tr>") + "</div>";
+  }
+
+  /* ----------------------------------------------------------------- staff */
+  async function renderStaff() {
+    const d = await get("/api/admin/staff");
+    $("view").innerHTML =
+      '<div class="card"><div class="row" style="margin-bottom:12px">' +
+      "<h2 style='margin:0'>👥 İstifadəçilər</h2>" +
+      '<button class="primary" id="newStaff" style="margin-inline-start:auto">+ Yeni</button></div>' +
+      table(["Ad","E-poçt","Rol","Aktiv","Son giriş",""], d.items, r =>
+        "<tr><td>" + esc(r.full_name) + "</td><td>" + esc(r.email) + "</td>" +
+        '<td><span class="pill">' + esc(r.role) + "</span></td>" +
+        "<td>" + (r.is_active ? "✅" : "—") + "</td><td>" + dt(r.last_login_at) + "</td>" +
+        "<td>" + (r.is_active && r.id !== me.id ?
+          '<button class="danger" onclick="__deact(' + r.id + ')">Deaktiv et</button>' : "") +
+        "</td></tr>") + "</div>";
+    $("newStaff").onclick = () => modal("Yeni istifadəçi",
+      '<div class="field"><label for="sn">Ad, soyad</label><input id="sn"></div>' +
+      '<div class="field"><label for="se">E-poçt</label><input id="se" type="email"></div>' +
+      '<div class="field"><label for="sp">Şifrə</label><input id="sp" type="password"></div>' +
+      '<div class="field"><label for="sr">Rol</label><select id="sr">' +
+      '<option value="support">support</option><option value="manager">manager</option>' +
+      '<option value="admin">admin</option></select></div>',
+      [{ label:"Yarat", cls:"primary", onClick: async () => {
+        try { await post("/api/admin/staff", { full_name:$("sn").value.trim(),
+                email:$("se").value.trim(), password:$("sp").value, role:$("sr").value });
+              $("modal").close(); toast("Yaradıldı"); refresh(); }
+        catch (e) { toast(e.message, true); } }}]);
+  }
+
+  window.__deact = async (id) => {
+    if (!confirm("Bu istifadəçini deaktiv etmək istədiyinizə əminsiniz?")) return;
+    try { await patch("/api/admin/staff/" + id + "/deactivate", {});
+          toast("Deaktiv edildi"); refresh(); }
+    catch (e) { toast(e.message, true); }
+  };
+
+  /* -------------------------------------------------------------- settings */
+  async function renderSettings() {
+    const t = await get("/api/admin/tenant");
+    const isAdmin = me.role === "admin";
+    $("view").innerHTML =
+      '<div class="card"><h2>⚙️ Sistem parametrləri</h2>' +
+      '<div class="field"><label>Sistem adı</label><input value="' + esc(t.name) + '" disabled></div>' +
+      '<div class="field"><label for="scope">Əhatə dairəsi (bota verilən təlimat)</label>' +
+      '<textarea id="scope" ' + (isAdmin ? "" : "disabled") + ">" + esc(t.scope_desc) +
+      "</textarea>" +
+      '<p class="muted">Bot bu təsvirdən kənar suallara cavab verməyəcək.</p></div>' +
+      '<div class="field"><label for="origins">İcazə verilən saytlar (vergüllə)</label>' +
+      '<input id="origins" ' + (isAdmin ? "" : "disabled") + ' value="' +
+      esc((t.allowed_origins || []).join(", ")) + '"></div>' +
+      (isAdmin ? '<button class="primary" id="saveTenant">Yadda saxla</button>' : "") +
+      "</div>" +
+
+      '<div class="card"><h2>🔌 Widget inteqrasiyası</h2>' +
+      "<p class='muted'>Host tətbiq komandasına bu kodu verin:</p>" +
+      "<pre style='background:#f0f3f6;padding:12px;border-radius:8px;overflow-x:auto;font-size:12px'>" +
+      esc('<script src="' + API + '/static/embed.js"\n        data-site-key="' +
+          t.site_key + '" defer><\/script>') + "</pre>" +
+      "<p class='muted'>Site key məxfi deyil — o yalnız sistemi tanıdır və heç bir " +
+      "məlumata giriş vermir.</p>" +
+      (isAdmin ? '<button class="danger" id="rotate">Site key-i dəyiş</button>' +
+        "<p class='muted'>Diqqət: köhnə açarla işləyən bütün widget-lər dayanacaq.</p>" : "") +
+      "</div>";
+
+    if (isAdmin) {
+      $("saveTenant").onclick = async () => {
+        try {
+          await patch("/api/admin/tenant", { scope_desc: $("scope").value.trim(),
+            allowed_origins: $("origins").value.split(",").map(s => s.trim()).filter(Boolean) });
+          toast("Yadda saxlanıldı");
+        } catch (e) { toast(e.message, true); }
+      };
+      $("rotate").onclick = async () => {
+        if (!confirm("Site key dəyişəcək və bütün widget-lər dayanacaq. Davam edilsin?")) return;
+        try { await post("/api/admin/tenant/rotate-site-key"); toast("Yeni açar yaradıldı"); refresh(); }
+        catch (e) { toast(e.message, true); }
+      };
+    }
+  }
+
+  /* ----------------------------------------------------------------- boot */
+  (async () => {
+    try { me = await get("/api/admin/me"); start(); }
+    catch (e) { showLogin(); }
+  })();
+})();
+</script>
+</body>
+</html>

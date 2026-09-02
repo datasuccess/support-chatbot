@@ -8,6 +8,7 @@ Exercises the paths a real user and a real support agent take:
     python -u scripts/smoke_test.py
 """
 import json
+import subprocess
 import sys
 import time
 
@@ -15,6 +16,35 @@ import httpx
 
 BASE = "http://localhost:8000"
 PASSWORD = "dev12345"
+
+
+def site_key() -> str:
+    out = subprocess.run(
+        ["docker", "exec", "support_chatbot_db", "psql", "-U", "chatbot", "-d",
+         "support_chatbot", "-tAc",
+         "SELECT site_key FROM tenants WHERE slug='mof-contracts'"],
+        capture_output=True, text=True,
+    )
+    return out.stdout.strip()
+
+
+def new_session(key: str) -> str:
+    """Create a conversation, respecting the rate limiter's Retry-After.
+
+    The suites share a per-IP budget, so running them back to back legitimately
+    trips the limiter. Backing off is correct behaviour for a client; weakening the
+    limiter to make tests pass would defeat the control being tested.
+    """
+    for attempt in range(4):
+        r = httpx.post(f"{BASE}/api/chat/session", json={"site_key": key}, timeout=30)
+        if r.status_code == 429:
+            wait = int(r.headers.get("Retry-After", "5"))
+            print(f"  … rate limited, waiting {wait}s")
+            time.sleep(min(wait, 65))
+            continue
+        r.raise_for_status()
+        return r.json()["session_token"]
+    raise RuntimeError("still rate limited after retries")
 
 passed = failed = 0
 
@@ -33,12 +63,13 @@ def section(title: str) -> None:
     print(f"\n=== {title} ===")
 
 
-def stream_chat(client: httpx.Client, session: str, message: str) -> dict:
+def stream_chat(client: httpx.Client, token: str, message: str) -> dict:
     """Consume the SSE stream and return the final `done` payload plus the text."""
     text, meta = "", {}
     with client.stream(
         "POST", f"{BASE}/api/chat/stream",
-        json={"session_id": session, "message": message, "tenant": "mof-contracts"},
+        headers={"Authorization": f"Bearer {token}"},
+        json={"message": message},
         timeout=120.0,
     ) as r:
         if r.status_code != 200:
@@ -70,8 +101,13 @@ def main() -> None:
     r = client.get(f"{BASE}/health", timeout=30)
     check("health returns ok", r.status_code == 200 and r.json().get("database") is True, r.text[:120])
 
+    section("session")
+    key = site_key()
+    check("site key readable", bool(key))
+    session = new_session(key)
+    check("session token issued", bool(session))
+
     section("chat — in-scope question")
-    session = f"smoke_{int(time.time())}"
     t0 = time.perf_counter()
     ans = stream_chat(client, session, "Sistemdə necə qeydiyyatdan keçə bilərəm?")
     elapsed = time.perf_counter() - t0
@@ -80,6 +116,8 @@ def main() -> None:
     check("has sources", len(ans.get("sources") or []) > 0)
     check("has message_id", bool(ans.get("message_id")))
     check("answer is Azerbaijani", any(c in ans.get("_text", "") for c in "əğışçöü"))
+    check("mode is grounded", ans.get("mode") == "grounded", str(ans.get("mode")))
+    check("no handover offered on a good answer", ans.get("offer_contact") is False)
     print(f"        confidence={ans.get('confidence')}  {elapsed:.1f}s  "
           f"tokens={ans.get('prompt_tokens')}/{ans.get('completion_tokens')}")
     print(f"        {ans.get('_text','')[:160]!r}")
@@ -88,21 +126,55 @@ def main() -> None:
     follow = stream_chat(client, session, "Bəs onu sonra dəyişə bilərəmmi?")
     check("follow-up answered", len(follow.get("_text", "")) > 30)
 
-    section("chat — out of scope")
-    oos = stream_chat(client, f"{session}_oos", "Bakıda hava necədir?")
-    check("out-of-scope escalates", oos.get("escalated") is True,
-          f"confidence={oos.get('confidence')}")
+    section("chat — scope enforcement")
+    oos = stream_chat(client, new_session(key), "Bakıda hava necədir?")
+    check("off-topic refused", oos.get("mode") == "refused", str(oos.get("mode")))
+
+    pol = stream_chat(client, new_session(key), "Prezident haqqında nə düşünürsən?")
+    check("political question refused", pol.get("mode") == "refused", str(pol.get("mode")))
+    check("refusal is categorised", bool(pol.get("refusal_category")),
+          str(pol.get("refusal_category")))
+
+    # A refusal must not become an operator task.
+    out = subprocess.run(
+        ["docker", "exec", "support_chatbot_db", "psql", "-U", "chatbot", "-d",
+         "support_chatbot", "-tAc",
+         "SELECT count(*) FROM escalations e JOIN refusals r "
+         "ON r.message_id = e.message_id"],
+        capture_output=True, text=True,
+    )
+    check("refusals do not create operator tasks", out.stdout.strip() == "0",
+          f"{out.stdout.strip()} leaked into the queue")
 
     section("feedback")
+    auth = {"Authorization": f"Bearer {session}"}
     mid = ans.get("message_id")
     if mid:
-        r = client.post(f"{BASE}/api/chat/rate", json={"message_id": mid, "value": 1})
+        r = client.post(f"{BASE}/api/chat/rate", headers=auth,
+                        json={"message_id": mid, "value": 1})
         check("thumbs up accepted", r.status_code == 200, r.text[:120])
-        r = client.post(f"{BASE}/api/chat/csat", json={"session_id": session, "score": 5})
+        r = client.post(f"{BASE}/api/chat/csat", headers=auth, json={"score": 5})
         check("csat accepted", r.status_code == 200, r.text[:120])
-        r = client.post(f"{BASE}/api/chat/escalate",
-                        json={"session_id": session, "note": "smoke test", "message_id": mid})
-        check("escalation created", r.status_code == 200 and r.json().get("ok"), r.text[:120])
+
+    section("contact request")
+    r = client.post(f"{BASE}/api/chat/contact", headers=auth, json={
+        "name": "Smoke Test", "channel": "phone", "phone": "+994501112233",
+        "note": "smoke test contact request"})
+    body = r.json() if r.status_code == 200 else {}
+    check("contact request accepted", r.status_code == 200, r.text[:150])
+    check("reference code returned", bool(body.get("reference_code")),
+          str(body.get("reference_code")))
+    print(f"        reference: {body.get('reference_code')}")
+
+    r = client.post(f"{BASE}/api/chat/contact", headers=auth, json={
+        "name": "Smoke Test", "channel": "phone", "phone": "+994501112233"})
+    check("duplicate request reuses the same ticket",
+          r.status_code == 200 and r.json().get("duplicate") is True, r.text[:120])
+
+    r = client.post(f"{BASE}/api/chat/contact", headers={"Authorization": f"Bearer {new_session(key)}"},
+                    json={"name": "No Contact", "channel": "phone"})
+    check("contact request without a number rejected", r.status_code == 422,
+          f"HTTP {r.status_code}")
 
     section("auth + RBAC")
     support = httpx.Client(follow_redirects=True)
@@ -129,9 +201,10 @@ def main() -> None:
     check("manager reads analytics", r.status_code == 200, r.text[:120])
 
     section("KB lifecycle + four-eyes")
+    stamp = int(time.time())
     r = support.post(f"{BASE}/api/admin/kb", json={
-        "question": "Smoke test sualı — silinməlidir",
-        "answer": "Bu yazı avtomatik testdən yaranıb və silinməlidir.",
+        "question": f"Smoke test sualı {stamp} — silinməlidir",
+        "answer": f"Bu yazı avtomatik testdən yaranıb ({stamp}) və silinməlidir.",
         "category": "Texniki dəstək", "tags": ["smoke"], "citation": "smoke test",
     })
     check("support creates draft", r.status_code == 201, r.text[:150])
@@ -160,7 +233,8 @@ def main() -> None:
         admin.post(f"{BASE}/api/admin/login",
                    json={"email": "admin@mof.local", "password": PASSWORD})
         r = admin.post(f"{BASE}/api/admin/kb", json={
-            "question": "Smoke four-eyes testi", "answer": "Öz yazısını təsdiqləyə bilməz.",
+            "question": f"Smoke four-eyes testi {stamp}",
+            "answer": f"Öz yazısını təsdiqləyə bilməz ({stamp}).",
         })
         own_id = r.json().get("id") if r.status_code == 201 else None
         if own_id:
@@ -170,13 +244,26 @@ def main() -> None:
                   f"{r.status_code} {r.text[:100]}")
             admin.post(f"{BASE}/api/admin/kb/{own_id}/archive")
 
+        r = support.post(f"{BASE}/api/admin/kb", json={
+            "question": f"Smoke test sualı {stamp} — silinməlidir",
+            "answer": f"Bu yazı avtomatik testdən yaranıb ({stamp}) və silinməlidir.",
+        })
+        check("duplicate content rejected with 409", r.status_code == 409,
+              f"HTTP {r.status_code}")
+
         r = manager.post(f"{BASE}/api/admin/kb/{entry_id}/archive")
         check("manager archives entry", r.status_code == 200, r.text[:120])
 
     section("review queue")
-    r = support.get(f"{BASE}/api/admin/escalations?status=open")
+    r = support.get(f"{BASE}/api/admin/escalations?status=open&kind=contact_request")
     items = r.json().get("items", []) if r.status_code == 200 else []
-    check("escalations listed", r.status_code == 200 and len(items) > 0, f"{len(items)} open")
+    check("contact requests listed", r.status_code == 200 and len(items) > 0,
+          f"{len(items)} open")
+    check("contact request carries contact details",
+          bool(items and items[0].get("contact_name") and items[0].get("reference_code")))
+
+    r = support.get(f"{BASE}/api/admin/escalations?status=open&kind=content_gap")
+    check("content gaps listed separately", r.status_code == 200, str(r.status_code))
 
     if items:
         eid = items[0]["id"]
@@ -186,8 +273,8 @@ def main() -> None:
         check("escalation has retrieval diagnostics", "retrieved" in body)
 
         r = support.post(f"{BASE}/api/admin/escalations/{eid}/promote", json={
-            "question": "Smoke promote sualı",
-            "answer": "Söhbətdən yaradılmış cavab — silinməlidir.",
+            "question": f"Smoke promote sualı {stamp}",
+            "answer": f"Söhbətdən yaradılmış cavab ({stamp}) — silinməlidir.",
             "category": "Texniki dəstək",
         })
         check("promote creates draft", r.status_code == 201 and r.json().get("status") == "draft",
@@ -207,6 +294,28 @@ def main() -> None:
     r = support.get(f"{BASE}/api/admin/analytics/gaps")
     check("gaps queue readable by support", r.status_code == 200, str(r.status_code))
 
+    section("attribution analytics")
+    for path, name in [
+        ("/api/admin/analytics/contributors", "who wrote what"),
+        ("/api/admin/analytics/approvers", "who approved what"),
+        ("/api/admin/analytics/operators", "operator workload"),
+        ("/api/admin/analytics/activity", "activity feed"),
+        ("/api/admin/analytics/refusals", "refusal stats"),
+        ("/api/admin/analytics/queue-health", "queue health"),
+    ]:
+        r = manager.get(f"{BASE}{path}")
+        check(f"{name}", r.status_code == 200, f"HTTP {r.status_code}")
+
+    r = manager.get(f"{BASE}/api/admin/analytics/contributors")
+    rows = r.json().get("items", []) if r.status_code == 200 else []
+    check("contributor stats attribute entries to authors", len(rows) > 0,
+          f"{len(rows)} contributors")
+
+    section("tenant settings")
+    r = manager.get(f"{BASE}/api/admin/tenant")
+    body = r.json() if r.status_code == 200 else {}
+    check("tenant settings readable", r.status_code == 200 and bool(body.get("site_key")))
+
     section("audit")
     r = manager.get(f"{BASE}/api/admin/audit?limit=5")
     check("audit readable", r.status_code == 200 and len(r.json().get("items", [])) > 0)
@@ -215,8 +324,8 @@ def main() -> None:
     check("audit chain valid", body.get("valid") is True, json.dumps(body))
     print(f"        chain: {body.get('checked')} entries verified")
 
-    section("widget assets")
-    for path in ("/widget", "/demo", "/static/embed.js"):
+    section("widget + console assets")
+    for path in ("/widget", "/demo", "/console", "/static/embed.js"):
         r = client.get(f"{BASE}{path}")
         check(f"{path} serves", r.status_code == 200, str(r.status_code))
 
