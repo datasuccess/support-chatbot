@@ -118,16 +118,33 @@ Embedding and reranking are local and cost nothing per query. Generating the who
 
 ## End-to-end tests
 
-`python -u scripts/smoke_test.py` — **37 passed, 0 failed**, covering:
+`python -u scripts/smoke_test.py` — **59 passed, 0 failed**, covering:
 
-* Streaming chat, multi-turn follow-up, out-of-scope escalation
-* Ratings, CSAT, manual escalation
+* Streaming chat, multi-turn follow-up, out-of-scope and political refusal
+* Ratings, CSAT, contact requests with reference codes and duplicate suppression
 * Login, wrong-password rejection, anonymous rejection, role boundaries
 * Full KB lifecycle: draft → submit → approve → publish → archive
 * **Four-eyes enforcement** — author cannot approve their own entry (409)
 * Review queue with transcript and retrieval diagnostics; promote-to-KB
 * Analytics endpoints; audit read and hash-chain verification (12 entries valid)
-* Widget, demo page and embed script all serving
+* Duplicate KB content rejected with 409
+* Attribution analytics: contributors, approvers, operators, activity, refusals
+* Widget, demo page, console and embed script all serving
+
+## Security tests
+
+`python -u scripts/security_test.py` — **25 attacks blocked, 0 vulnerable**. Each
+check is written as an attack and passes only when the attack fails:
+
+* Site-key forgery; conversation hijack; cross-conversation rating
+* Token forgery — garbage, tampered payload, stripped signature
+* Every chat endpoint rejecting unauthenticated calls
+* Scope enforcement: political, off-topic, other participants' data, prompt injection
+* Queue hygiene — no contact requests without contact details
+* Per-account lockout; admin surface authentication
+
+These correspond one-to-one with the holes found in the pre-handover probe
+documented in `SECURITY.md`.
 
 ## What these numbers do not tell you
 

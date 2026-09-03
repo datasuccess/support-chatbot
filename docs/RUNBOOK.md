@@ -17,12 +17,54 @@ python -u scripts/seed_db.py
 uvicorn app.main:app --app-dir api --reload
 ```
 
+Then verify:
+
+```bash
+python -u scripts/smoke_test.py       # 59 end-to-end checks
+python -u scripts/security_test.py    # 25 attacks, all must be blocked
+python -u evals/run_eval.py           # retrieval quality gate
+```
+
+| URL | For |
+|---|---|
+| `/console` | Staff — queue, KB, approvals, analytics |
+| `/demo` | Host page with the widget embedded |
+| `/docs` | OpenAPI |
+
 First start downloads ~2.5GB of model weights and takes several minutes. Later
 starts load from `~/.cache/huggingface` in 10-30 seconds.
 
 ---
 
 ## Daily operations
+
+### Site key — handing the widget to the host-app team
+
+The site key is generated per install, so it is never committed. Get it from
+**Console → Settings → Widget integration**, or:
+
+```sql
+SELECT site_key FROM tenants WHERE slug = 'mof-contracts';
+```
+
+Give the host-app team one line:
+
+```html
+<script src="https://<api-host>/static/embed.js"
+        data-site-key="<key>" defer></script>
+```
+
+Then add their origin to the allow-list, or the API will reject the calls:
+
+```sql
+UPDATE tenants SET allowed_origins = ARRAY['https://tender.example.az']
+WHERE slug = 'mof-contracts';
+```
+
+An empty array means "allow any origin" — acceptable locally, never in production.
+
+Rotating the key (Console → Settings) **breaks every embedded widget** until the
+host app is updated. Break-glass only.
 
 ### Health
 ```bash
@@ -37,9 +79,46 @@ curl -s localhost:8000/api/admin/audit/verify -b cookies.txt | jq
 `{"valid": true}` is expected. A `broken_at_id` means the log was tampered with —
 treat as a security incident, not a bug.
 
-### Check the escalation backlog
+### Check the operator queue
+
+The two kinds need different attention. Contact requests are people waiting for a
+reply; content gaps are missing articles.
+
 ```sql
-SELECT reason, count(*) FROM escalations WHERE status='open' GROUP BY reason;
+SELECT * FROM v_queue_health;
+
+-- Anyone waiting more than a day is a service failure.
+SELECT reference_code, contact_name, preferred_channel,
+       coalesce(contact_phone, contact_email) AS reach_them,
+       age(now(), created_at) AS waiting
+FROM escalations
+WHERE kind = 'contact_request' AND status = 'open'
+ORDER BY created_at;
+```
+
+### Check what is being refused
+
+```sql
+SELECT category, count(*) FROM refusals
+WHERE created_at > now() - interval '7 days' GROUP BY 1 ORDER BY 2 DESC;
+```
+
+Read this in both directions. Rising `political` or `abusive` means the guard is
+working. Rising `out_of_scope` on questions that clearly are about the system means
+the threshold is too high, the guard too aggressive, or the knowledge base too thin
+— check the actual questions before assuming:
+
+```sql
+SELECT question, confidence FROM refusals
+WHERE category = 'out_of_scope' ORDER BY created_at DESC LIMIT 30;
+```
+
+### Who did what
+
+```sql
+SELECT * FROM v_contributor_stats WHERE entries_authored > 0;
+SELECT * FROM v_approver_stats;
+SELECT * FROM v_operator_stats;   -- turned_into_kb_entries = flywheel health
 ```
 
 ### Watch cost
@@ -53,24 +132,22 @@ prompt regression sending too much context.
 
 ## Adding knowledge base content
 
-**Through the console** (normal path):
-1. `support` creates a draft → `POST /api/admin/kb`
-2. `support` submits → `POST /api/admin/kb/{id}/submit`
-3. `manager` approves → `POST /api/admin/kb/{id}/approve`
-4. Reindex → `POST /api/admin/kb/reindex`
+**Through the console** (normal path): *Bilik bazası → + Yeni yazı* → *Təsdiqə
+göndər* → a **manager** opens *Təsdiq* and publishes.
 
-Four-eyes is enforced: the approver cannot be the author.
+Four-eyes is enforced on identity: the approver cannot be the author, and an admin
+cannot approve their own draft either.
 
-**From a real conversation** (the flywheel):
-1. Open the review queue → `GET /api/admin/escalations?status=open`
-2. Inspect one → `GET /api/admin/escalations/{id}` — includes the full transcript
-   *and* what the retriever considered
-3. Write the answer → `POST /api/admin/escalations/{id}/promote`
-4. It lands as a **draft**; a manager still approves it
+Identical content is rejected with a 409 naming the existing entry — near-duplicates
+split the retrieval signal and make ranking worse as the corpus grows.
 
-**Read the `retrieved` block before writing new content.** If the right entry is
-already there but ranked 7th, this is a retrieval problem, not a content problem,
-and adding a near-duplicate entry makes retrieval worse rather than better.
+**From a real conversation** (the flywheel): *Növbə* → open a content gap →
+*Bilik bazasına əlavə et*. It lands as a **draft**; a manager still approves it.
+
+**Read the «Axtarış nəticələri» block before writing new content.** If the right
+entry is already there but ranked 7th, this is a *retrieval* problem, not a content
+problem, and adding a near-duplicate makes retrieval worse rather than better.
+Missing this distinction is how knowledge bases rot.
 
 ### Reindexing
 Embeddings refresh automatically for entries whose `content_hash` changed.
@@ -156,8 +233,12 @@ Err high.
 | Migration exits 0 but nothing applied | `docker exec` without `-i` | Use `cat file.sql \| docker exec -i …` — `scripts/migrate.sh` already does |
 | Everything escalates | No embeddings | `SELECT count(*) FROM kb_embeddings;` then reindex |
 | Answers ignore the knowledge base | Retrieval returning nothing | Check entries are `published` and within their validity window |
-| 429 responses | Rate limiter | 20 chat/min per IP by design; raise in `core/ratelimit.py` if wrong |
-| Widget blank in the host page | CORS | Add the host origin to `WIDGET_ALLOWED_ORIGINS` |
+| 429 responses | Rate limiter | 20 messages/min, 30 sessions/min per IP by design; tune in `core/ratelimit.py` |
+| All users rate-limited together | App behind a proxy with `TRUSTED_PROXIES` unset | Set it to the proxy's CIDR so `X-Forwarded-For` is honoured |
+| Widget shows a connection error | Site key wrong, or origin not allow-listed | Check `tenants.site_key` and `tenants.allowed_origins` |
+| Widget 401 on every message | Session token expired (12h) | Reload the page; it mints a new one |
+| Staff account will not log in | Per-account lockout after 5 failures | `UPDATE staff_users SET failed_login_attempts=0, locked_until=NULL WHERE email=…` |
+| Legitimate questions being refused | Guard too aggressive, or threshold too high | Inspect `refusals`; tune `chat/guard.py` or `REFUSAL_THRESHOLD` |
 
 ---
 
@@ -172,6 +253,10 @@ Nothing here is optional.
 - [ ] Seeded local staff accounts (`*.local`, password `dev12345`) removed
 - [ ] `APP_ENV` set to something other than `local` (this also arms `secure` cookies)
 - [ ] `WIDGET_ALLOWED_ORIGINS` restricted to real host origins
+- [ ] `tenants.allowed_origins` set — an empty array allows any site to embed the widget
+- [ ] Site key rotated after handover, if it was ever shared over an insecure channel
+- [ ] `TRUSTED_PROXIES` set to the reverse proxy's CIDR, or per-IP limiting is useless
+- [ ] `python -u scripts/security_test.py` passes with 0 vulnerable
 - [ ] TLS terminated in front of the API
 - [ ] Retention and deletion policy agreed and implemented
 - [ ] Backup configured **and a restore actually tested**

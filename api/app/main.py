@@ -7,7 +7,7 @@ import pathlib
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.admin.router import router as admin_router
@@ -121,12 +121,15 @@ async def console_page() -> FileResponse:
 
 
 @app.get("/demo", include_in_schema=False)
-async def demo_page() -> FileResponse:
-    """A host page embedding the widget, to exercise the real iframe path."""
-    return FileResponse(
-        pathlib.Path(__file__).resolve().parents[2] / "widget" / "demo.html",
-        media_type="text/html",
-    )
+async def demo_page() -> HTMLResponse:
+    """A host page embedding the widget, to exercise the real iframe path.
+
+    The site key is injected from the database rather than hardcoded: it is
+    generated per install, so a checked-in value would break on every fresh clone.
+    """
+    html = (pathlib.Path(__file__).resolve().parents[2] / "widget" / "demo.html").read_text()
+    row = await fetch_one("SELECT site_key FROM tenants WHERE slug = %s", (settings.default_tenant,))
+    return HTMLResponse(html.replace("__SITE_KEY__", row["site_key"] if row else ""))
 
 
 app.include_router(chat_router)

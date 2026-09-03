@@ -122,6 +122,9 @@ python -u scripts/smoke_test.py     # 59 end-to-end checks
 python -u scripts/security_test.py  # 25 attacks, each passing only when blocked
 ```
 
+Picking this up on another machine or handing it over? Start with
+[`HANDOVER.md`](HANDOVER.md).
+
 ## Documentation
 
 | Document | Contents |
@@ -132,6 +135,7 @@ python -u scripts/security_test.py  # 25 attacks, each passing only when blocked
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Threat model, RBAC, PII handling, known gaps |
 | [`docs/OPERATIONS_MODEL.md`](docs/OPERATIONS_MODEL.md) | How work reaches a human; content gaps vs contact requests |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Operational procedures, go-live checklist |
+| [`HANDOVER.md`](HANDOVER.md) | Getting started on a new machine; current status |
 | [`docs/API.md`](docs/API.md) | Endpoint reference |
 | [`docs/EVALUATION.md`](docs/EVALUATION.md) | Measured results, latency, cost, and what they do not prove |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phase status: what is built, what is not |

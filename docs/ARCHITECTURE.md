@@ -7,13 +7,14 @@ Four deployable pieces, one database.
 ```
 ┌───────────────┐   iframe    ┌──────────────────────────────────────┐
 │  host app     │────────────▶│  widget  (vanilla JS, no framework)  │
-│  (e-tender    │             └──────────────┬───────────────────────┘
+│  (e-tender    │  site key   └──────────────┬───────────────────────┘
 │   portal)     │                            │ SSE over fetch
-└───────────────┘                            ▼
-                              ┌──────────────────────────────────────┐
-                              │  FastAPI                             │
-                              │   /api/chat/*    public, anonymous   │
-                              │   /api/admin/*   staff, RBAC         │
+└───────────────┘                            │ Bearer <conversation token>
+                                             ▼
+┌───────────────┐             ┌──────────────────────────────────────┐
+│ staff console │────────────▶│  FastAPI                             │
+│ (/console)    │  cookie     │   /api/chat/*    public, token-bound │
+└───────────────┘             │   /api/admin/*   staff, RBAC         │
                               └───┬──────────────────────┬───────────┘
                                   │                      │
                    ┌──────────────▼───────┐   ┌──────────▼──────────┐
@@ -33,6 +34,20 @@ Four deployable pieces, one database.
 
 This is the part that determines whether the product works. Everything else is
 plumbing around it.
+
+### 0. Input guard
+
+Before anything is spent, a pattern check refuses political, abusive and
+other-participants'-data questions outright — no retrieval, no LLM call, no cost.
+
+The retrieval gate below is the *primary* control and does the real work. This
+layer exists because a politically loaded question can incidentally share
+vocabulary with the knowledge base ("tender saxtakarlığı" overlaps procurement
+content) and might otherwise score high enough to reach the model. Structural
+refusal beats asking the model nicely.
+
+See `chat/guard.py`. False refusals are visible in `v_refusal_stats` and cheap to
+correct; a political answer published under a ministry logo is not.
 
 ### 1. Query rewriting
 
@@ -98,6 +113,19 @@ the measured distribution; see ADR-009). Below it, the bot does not call the
 LLM at all — it returns a fixed message offering a human, and opens an escalation
 so the support team sees the gap even if the user gives up and leaves.
 
+There are in fact **two** thresholds, producing three outcomes:
+
+| Confidence | Mode | Consequence |
+|---|---|---|
+| ≥ `CONFIDENCE_THRESHOLD` (0.10) | `grounded` | Answer from the knowledge base |
+| ≥ `REFUSAL_THRESHOLD` (0.05) | `escalated` | In scope but unmatched — offer a human, log a content gap |
+| below | `refused` | Out of scope — flat refusal, **no operator task** |
+
+The band between them is where a question looks like it belongs to this system but
+the knowledge base cannot answer it. Collapsing these two (as an earlier version
+did) floods the operator queue with off-topic questions nobody owes a reply to.
+See `OPERATIONS_MODEL.md` and ADR-013.
+
 Tuning this is a policy decision, not a technical one. Higher means fewer wrong
 answers and more escalations; lower means the reverse. Measured separation on the
 golden set is wide — in-scope median 0.968 against an off-topic ceiling of 0.0033 —
@@ -141,6 +169,35 @@ Redis dependency costs more operational surface than it buys. The trade-off — 
 are per-process, so multiple workers multiply the ceiling — is documented and must
 be revisited before the API runs more than one worker.
 
+## Public API authorisation
+
+End users never log in, so authority comes from two unforgeable things:
+
+* **Site key** — per-tenant, public, ships in the host page. Identifies the caller
+  so the API can apply per-tenant origin rules and rate limits. CORS cannot do
+  this: it is browser-enforced, and a direct HTTP client ignores it entirely.
+* **Conversation token** — HMAC-signed, committing to one conversation id. Every
+  endpoint derives its conversation from the token, so ownership is structural
+  rather than a caller-supplied parameter.
+
+A pre-handover probe found the earlier design trusted a client-supplied
+`session_id`: sending someone else's appended messages to their conversation and
+pulled their history into the LLM context. See `SECURITY.md` and ADR-011.
+
+Behind a reverse proxy, `request.client.host` is the *proxy's* address, so per-IP
+rate limiting collapses into one shared bucket. `core/net.py` honours
+`X-Forwarded-For` only when the immediate peer is a configured trusted proxy —
+trusting it unconditionally would let anyone sidestep the limiter with a header.
+
+## The staff console
+
+A single self-contained HTML file at `/console`. No build step, no bundler, no
+`node_modules`. Served from the API origin, so the session cookie is same-origin
+and there is no CORS credential handling at all.
+
+The API is the real contract and is fully tested; the console is forms and tables
+over it. Port it to a framework if it grows real client-side state — see ADR-016.
+
 ## Multi-tenancy
 
 Every domain table carries `tenant_id`, and every query filters on it. Adding the
@@ -159,10 +216,13 @@ Honest list of what is not built:
   traffic; an obvious win later.
 * **Single process.** No horizontal scaling story yet; the in-memory rate limiter
   assumes one worker.
+* **The input guard is pattern-based.** It catches obvious cases, not creative
+  phrasing. The retrieval gate is the control that actually holds; the guard is
+  belt-and-braces for questions that overlap KB vocabulary.
 * **No streaming for escalations from the LLM.** Escalation replies are fixed text,
   chunked client-side to keep the rendering path identical.
-* **Session identity is client-supplied.** A `session_id` from `sessionStorage`
-  identifies a conversation. Adequate for anonymous support chat, not for anything
-  requiring authenticated per-user history.
+* **Conversation tokens are bearer tokens.** Anyone holding one can act on that
+  conversation. Adequate for anonymous support chat; not sufficient if per-user
+  authenticated history is ever required.
 * **Query rewriting costs an extra LLM round trip** on every multi-turn message.
   Could be skipped when the question has no pronouns, at the cost of some accuracy.

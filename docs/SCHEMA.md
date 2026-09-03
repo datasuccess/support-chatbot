@@ -16,10 +16,20 @@ One row per system served. `scope_desc` is injected into the system prompt as th
 bot's scope guardrail, which is why the next ministry system is a row rather than
 a fork.
 
+| Column | Purpose |
+|---|---|
+| `site_key` | Public per-tenant key the widget presents. Not a secret — it ships in the host page — but it lets the API identify and rate-limit callers server-side, which CORS cannot do (ADR-012) |
+| `allowed_origins` | Origins permitted to embed this tenant's widget, checked against Origin/Referer. Empty = allow any (local development only) |
+
 ### `staff_users`
 Ministry staff only — end users of the widget are anonymous and never appear here.
 `role` is the `staff_role` enum: `admin | support | manager`. Unique on
 `(tenant_id, email)`, so the same person can hold different roles across tenants.
+
+`failed_login_attempts` and `locked_until` implement per-account lockout. Per-IP
+rate limiting cannot stop a distributed brute force against one account, and
+tightening it instead would lock out everyone behind a shared office gateway
+(ADR-014).
 
 ### `staff_sessions`
 Opaque UUID sessions with server-side revocation. Partial index on non-revoked rows.
@@ -66,8 +76,13 @@ Immutable record of each approve/reject decision, with the deciding user and not
 ## Conversations and tracing
 
 ### `conversations`
-One per `(tenant, session_id)`. `ip_hash` is a salted, truncated hash — never the
-address. `csat` holds the 1-5 end-of-conversation score.
+`ip_hash` is a salted, truncated hash — never the address. `csat` holds the 1-5
+end-of-conversation score.
+
+`session_id` is now **server-generated and used only for correlation**. It grants
+no access: callers address a conversation with an HMAC-signed token that commits
+to its id (ADR-011). Previously the client supplied this value and the server
+trusted it, which allowed posting into other people's conversations.
 
 ### `messages`
 `role` is the `message_role` enum. Content only; everything analytical lives in the
@@ -77,6 +92,14 @@ two tables below, which keeps the transcript clean.
 One row per assistant message: `answer_mode`, `confidence`, `escalated`, the
 rewritten query, all three model names, token counts, `cost_usd`, and a latency
 breakdown (`retrieval_ms` / `llm_ms` / `total_ms`).
+
+`answer_mode` takes three values, and the distinction drives everything downstream:
+
+| Value | Meaning | Creates |
+|---|---|---|
+| `grounded` | Answered from the knowledge base | nothing |
+| `escalated` | In scope, no good match | a `content_gap` |
+| `refused` | Out of scope | a `refusals` row — **never** an operator task |
 
 ### `message_retrievals`
 One row per candidate considered — not just the ones used. Holds `vector_score`,
@@ -98,9 +121,32 @@ entry did not exist (content gap) versus the entry existed but ranked poorly
 an escalation automatically.
 
 ### `escalations`
-The support team's work queue. `reason` is `low_confidence`, `user_request` or
-`negative_rating`. `resolved_entry_id` links to the knowledge-base entry the
-escalation became — closing the flywheel loop.
+The operator queue, split by `kind` (the `escalation_kind` enum). These are
+different things with different urgency, and conflating them buries the ones that
+matter (ADR-013):
+
+| `kind` | Created by | Means | Contact details |
+|---|---|---|---|
+| `content_gap` | System, automatically | The knowledge base is missing something | none |
+| `contact_request` | The user, explicitly | **A person is waiting for a reply** | required |
+
+Contact-request columns: `reference_code` (shown to the user, e.g. `DS-WNUHQH`),
+`contact_name`, `contact_phone`, `contact_email`, `preferred_channel`.
+`first_response_at` is set once and never moved — it measures how long the person
+waited before anyone touched their request.
+
+`reason` remains `low_confidence`, `user_request` or `negative_rating`.
+`resolved_entry_id` links to the entry the escalation became, closing the flywheel.
+
+### `refusals`
+Out-of-scope questions — political, abusive, requests for other participants'
+data, or simply unrelated. Logged for monitoring and **deliberately kept out of
+the operator queue**: nobody owes these people a callback, and routing them to
+humans would swamp the real requests.
+
+`category` is `out_of_scope`, `political`, `abusive` or `personal_data`. Watch it
+in both directions: rising political refusals means the guard works; rising
+`out_of_scope` on legitimate questions means it is too aggressive.
 
 ---
 
@@ -133,6 +179,21 @@ numbers.
 | `v_cost_daily` | Tokens, cost and latency per day |
 | `v_kb_health` | Counts by status, plus **how many synthetic rows remain** |
 
+### Attribution views (migration 005)
+
+The data was always captured — `kb_entries.created_by`/`approved_by`,
+`kb_entry_versions.changed_by`, `approvals.decided_by`, `audit_log`. These views
+make it answerable without hand-written SQL.
+
+| View | Answers |
+|---|---|
+| `v_contributor_stats` | **Who wrote what** — authored, published, awaiting approval, rejected, entries from conversations, edits made |
+| `v_approver_stats` | Who approved or rejected what, and average hours to decide |
+| `v_operator_stats` | Operator workload; crucially, **how often gaps became KB entries** — the best single indicator of whether the flywheel turns |
+| `v_activity_feed` | Chronological who-did-what, joined to staff names |
+| `v_queue_health` | Open/in-progress/resolved by kind, items open over 24h, time to first response |
+| `v_refusal_stats` | Refusals per day by category |
+
 ---
 
 ## Entity relationships
@@ -149,7 +210,19 @@ tenants ─┬─ staff_users ── staff_sessions
          │                             └─ ratings
          │
          ├─ escalations ──▶ conversations, messages, kb_entries
+
+         ├─ refusals ──▶ conversations, messages
          └─ ingest_runs
 
 audit_log   (no FKs — intentionally detached)
 ```
+
+## Migration history
+
+| File | Adds |
+|---|---|
+| `001_init.sql` | Tenants, staff, sessions, KB entries + versions + embeddings, approvals |
+| `002_conversations.sql` | Conversations, messages, traces, retrievals, ratings, escalations, hash-chained audit, ingest runs |
+| `003_analytics.sql` | Seven operational views |
+| `004_security_and_contact.sql` | Site keys, allowed origins, account lockout, `escalation_kind` split, contact-request columns, `refusals` |
+| `005_attribution.sql` | Six attribution and queue-health views |
